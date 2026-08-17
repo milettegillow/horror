@@ -19,7 +19,7 @@
    fetch and Archive.update() with a PATCH is the whole job.
 
    film = {
-     id, title, year, director, posterUrl,
+     id, title, year, director, posterUrl, tmdbId,
      status:    "to_watch" | "watched" | "banished",
      enjoyment: 1 | 2 | 3 | null,   // how much I liked it
      fear:      1 | 2 | 3 | null,   // how scary it was
@@ -27,8 +27,10 @@
      yearWatched: string
    }
 
-   posterUrl starts empty and is filled in at runtime by the
-   poster service below. Until it is, the tile draws its plate.
+   posterUrl and tmdbId start empty and are filled in at runtime
+   by the poster service below. Until then the tile draws its
+   plate. Once tmdbId is known it is the canonical reference to
+   the film on TMDB - no further searching is done.
    ------------------------------------------------------------ */
 
 const SEED_FILMS = [
@@ -38,6 +40,7 @@ const SEED_FILMS = [
     year: 1922,
     director: 'F. W. Murnau',
     posterUrl: '',
+    tmdbId: null,
     status: 'watched',
     enjoyment: 3,
     fear: 2,
@@ -50,6 +53,7 @@ const SEED_FILMS = [
     year: 1932,
     director: 'Carl Theodor Dreyer',
     posterUrl: '',
+    tmdbId: null,
     status: 'to_watch',
     enjoyment: null,
     fear: null,
@@ -62,6 +66,7 @@ const SEED_FILMS = [
     year: 1960,
     director: 'Mario Bava',
     posterUrl: '',
+    tmdbId: null,
     status: 'to_watch',
     enjoyment: null,
     fear: null,
@@ -74,6 +79,7 @@ const SEED_FILMS = [
     year: 1961,
     director: 'Jack Clayton',
     posterUrl: '',
+    tmdbId: null,
     status: 'watched',
     enjoyment: 3,
     fear: 3,
@@ -86,6 +92,7 @@ const SEED_FILMS = [
     year: 1973,
     director: 'Nicolas Roeg',
     posterUrl: '',
+    tmdbId: null,
     status: 'watched',
     enjoyment: 3,
     fear: 2,
@@ -98,6 +105,7 @@ const SEED_FILMS = [
     year: 1977,
     director: 'Dario Argento',
     posterUrl: '',
+    tmdbId: null,
     status: 'watched',
     enjoyment: 1,
     fear: 3,
@@ -110,6 +118,7 @@ const SEED_FILMS = [
     year: 1980,
     director: 'Stanley Kubrick',
     posterUrl: '',
+    tmdbId: null,
     status: 'watched',
     enjoyment: 3,
     fear: 2,
@@ -122,6 +131,7 @@ const SEED_FILMS = [
     year: 1984,
     director: 'Neil Jordan',
     posterUrl: '',
+    tmdbId: null,
     status: 'to_watch',
     enjoyment: null,
     fear: null,
@@ -134,6 +144,7 @@ const SEED_FILMS = [
     year: 1992,
     director: 'Francis Ford Coppola',
     posterUrl: '',
+    tmdbId: null,
     status: 'banished',
     enjoyment: 1,
     fear: 1,
@@ -146,6 +157,7 @@ const SEED_FILMS = [
     year: 2001,
     director: 'Alejandro Amenábar',
     posterUrl: '',
+    tmdbId: null,
     status: 'watched',
     enjoyment: 2,
     fear: 3,
@@ -158,6 +170,7 @@ const SEED_FILMS = [
     year: 2015,
     director: 'Guillermo del Toro',
     posterUrl: '',
+    tmdbId: null,
     status: 'watched',
     enjoyment: 3,
     fear: 1,
@@ -170,6 +183,7 @@ const SEED_FILMS = [
     year: 2015,
     director: 'Robert Eggers',
     posterUrl: '',
+    tmdbId: null,
     status: 'to_watch',
     enjoyment: null,
     fear: null,
@@ -182,6 +196,7 @@ const SEED_FILMS = [
     year: 2018,
     director: 'Ari Aster',
     posterUrl: '',
+    tmdbId: null,
     status: 'banished',
     enjoyment: 1,
     fear: 3,
@@ -189,11 +204,12 @@ const SEED_FILMS = [
     yearWatched: '2019'
   },
   {
-    id: 'saint-maud-2019',
+    id: 'saint-maud-2020',
     title: 'Saint Maud',
-    year: 2019,
+    year: 2020,
     director: 'Rose Glass',
     posterUrl: '',
+    tmdbId: null,
     status: 'to_watch',
     enjoyment: null,
     fear: null,
@@ -249,14 +265,100 @@ const Archive = (function () {
 const TMDB_ENDPOINT = '/api/tmdb';
 const POSTER_BASE = 'https://image.tmdb.org/t/p/w500';
 
+/* ---- choosing the right film out of a search ----------------
+   Title dominates: the tiers are far enough apart that no amount
+   of year or popularity can promote a film with the wrong name.
+   Year only nudges, and never disqualifies - a release date that
+   disagrees with the seed data by a decade still leaves the film
+   eligible, it just stops being the obvious answer. Votes settle
+   ties, so a real film always beats an obscure namesake.
+   ------------------------------------------------------------ */
+
+const TITLE_EXACT = 1000;
+const TITLE_PREFIX = 600;
+const TITLE_PARTIAL = 300;
+const YEAR_CLOSE = 120;   // within 1 year
+const YEAR_NEAR = 60;     // within 3 years
+const YEAR_FAR = 5;       // anything else: near zero, still eligible
+const VOTE_WEIGHT = 40;   // less than one year tier, so it only breaks ties
+const VOTE_CEILING = 4000;
+
+/* fold case, accents and punctuation, so "Bram Stoker's Dracula"
+   and "Bram Stokers Dracula" are the same string */
+function normalise(value) {
+  return String(value == null ? '' : value)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function titleScore(result, target) {
+  const candidates = [normalise(result.title), normalise(result.original_title)];
+  let best = 0;
+
+  candidates.forEach(function (candidate) {
+    if (!candidate) return;
+    let score = 0;
+    if (candidate === target) score = TITLE_EXACT;
+    else if (candidate.indexOf(target) === 0) score = TITLE_PREFIX;
+    else if (candidate.indexOf(target) > -1 || target.indexOf(candidate) > -1) score = TITLE_PARTIAL;
+    if (score > best) best = score;
+  });
+
+  return best;
+}
+
+function yearScore(result, year) {
+  const released = Number(String(result.release_date || '').slice(0, 4));
+  if (!released) return YEAR_FAR;
+  const distance = Math.abs(released - year);
+  if (distance <= 1) return YEAR_CLOSE;
+  if (distance <= 3) return YEAR_NEAR;
+  return YEAR_FAR;
+}
+
+function voteScore(result) {
+  const votes = Math.max(0, Number(result.vote_count) || 0);
+  return (Math.min(votes, VOTE_CEILING) / VOTE_CEILING) * VOTE_WEIGHT;
+}
+
+function scoreResult(result, film) {
+  const title = titleScore(result, normalise(film.title));
+  if (!title) return 0;   // the name has to appear at all
+  return title + yearScore(result, film.year) + voteScore(result);
+}
+
+function pickResult(results, film) {
+  let best = null;
+  let bestScore = 0;
+
+  results.forEach(function (result) {
+    /* a match with no artwork is no use to a poster grid */
+    if (!result || !result.poster_path) return;
+    const score = scoreResult(result, film);
+    if (score > bestScore) {
+      bestScore = score;
+      best = result;
+    }
+  });
+
+  return best;
+}
+
 const Posters = (function () {
   const cache = new Map();     // film id -> poster URL, or '' for "none found"
   const pending = new Set();
 
-  function settle(film, url) {
+  function settle(film, url, reason) {
     pending.delete(film.id);
     cache.set(film.id, url);
-    if (!url) return;
+    if (!url) {
+      console.warn('horror: no poster for ' + film.title + ' (' + film.year + ') - ' +
+        (reason || 'unknown reason'));
+      return;
+    }
     Archive.update(film.id, { posterUrl: url });
     paintPoster(film.id, url);
   }
@@ -266,28 +368,41 @@ const Posters = (function () {
   function preload(film, url) {
     const probe = new Image();
     probe.onload = function () { settle(film, url); };
-    probe.onerror = function () { settle(film, ''); };
+    probe.onerror = function () { settle(film, '', 'the poster image would not load'); };
     probe.src = url;
   }
 
-  function request(film) {
-    const query = TMDB_ENDPOINT +
-      '?query=' + encodeURIComponent(film.title) +
-      '&year=' + encodeURIComponent(film.year);
-
-    fetch(query)
+  /* Search by title, then take the best result rather than the
+     first. TMDB orders by popularity, so the 2024 Nosferatu and
+     the 2018 Suspiria both outrank the films we actually want. */
+  function search(film) {
+    fetch(TMDB_ENDPOINT + '?query=' + encodeURIComponent(film.title))
       .then(function (response) { return response.ok ? response.json() : null; })
       .then(function (data) {
         const results = data && Array.isArray(data.results) ? data.results : [];
-        const first = results[0];
-        const path = first && first.poster_path;
-        if (path) {
-          preload(film, POSTER_BASE + path);
+        const match = pickResult(results, film);
+        if (!match) {
+          settle(film, '', 'no result matched the title');
+          return;
+        }
+        Archive.update(film.id, { tmdbId: match.id });
+        preload(film, POSTER_BASE + match.poster_path);
+      })
+      .catch(function () { settle(film, '', 'the search request failed'); });
+  }
+
+  /* Already resolved once: go straight to the film by id. */
+  function lookup(film) {
+    fetch(TMDB_ENDPOINT + '?id=' + encodeURIComponent(film.tmdbId))
+      .then(function (response) { return response.ok ? response.json() : null; })
+      .then(function (movie) {
+        if (movie && movie.poster_path) {
+          preload(film, POSTER_BASE + movie.poster_path);
         } else {
-          settle(film, '');
+          settle(film, '', 'lookup by id returned no poster');
         }
       })
-      .catch(function () { settle(film, ''); });
+      .catch(function () { settle(film, '', 'the lookup request failed'); });
   }
 
   return {
@@ -295,7 +410,7 @@ const Posters = (function () {
     load: function (film) {
       if (cache.has(film.id) || pending.has(film.id)) return;
       pending.add(film.id);
-      request(film);
+      if (film.tmdbId) { lookup(film); } else { search(film); }
     },
     loadAll: function (films) {
       films.forEach(function (film) { Posters.load(film); });
