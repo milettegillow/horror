@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>horror - a ledger of the gothic</title>
+<meta name="description" content="A private ledger of horror and gothic cinema: watched, waiting and banished.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<a class="skip" href="#collection">Skip to the collection</a>
+
+<header class="masthead">
+  <h1 class="wordmark">horror</h1>
+  <div class="rule rule--wide" aria-hidden="true">
+    <span class="rule-line"></span>
+    <span class="diamond"></span>
+    <span class="rule-line"></span>
+  </div>
+  <p class="tagline">A private ledger of the gothic - kept, watched and occasionally banished.</p>
+</header>
+
+<nav class="tabs" id="tabs" role="tablist" aria-label="Collection views">
+  <!-- tab buttons rendered by script.js -->
+</nav>
+
+<main class="shell">
+  <section id="collection" class="collection" role="tabpanel" aria-label="Collection">
+    <!-- grid or placeholder rendered by script.js -->
+  </section>
+
+  <div class="rule rule--foot" aria-hidden="true">
+    <span class="rule-line"></span>
+    <span class="diamond"></span>
+    <span class="rule-line"></span>
+  </div>
+
+  <footer class="colophon">
+    <p>Fourteen entries. No posters yet - the plates will do.</p>
+  </footer>
+</main>
+
+<div class="scrim" id="scrim" hidden>
+  <div class="panel" id="panel" role="dialog" aria-modal="true" aria-labelledby="panelTitle" tabindex="-1">
+
+    <button class="panel-close" id="panelClose" type="button">close</button>
+
+    <p class="panel-eyebrow" id="panelEyebrow">Entry</p>
+    <h2 class="panel-title" id="panelTitle"></h2>
+    <p class="panel-sub" id="panelSub"></p>
+
+    <div class="rule" aria-hidden="true">
+      <span class="rule-line"></span>
+      <span class="diamond"></span>
+      <span class="rule-line"></span>
+    </div>
+
+    <div class="field">
+      <span class="field-label" id="statusLabel">Standing</span>
+      <div class="segmented" id="statusGroup" role="group" aria-labelledby="statusLabel"></div>
+    </div>
+
+    <div class="field">
+      <span class="field-label" id="verdictLabel">Verdict</span>
+      <div class="segmented" id="verdictGroup" role="group" aria-labelledby="verdictLabel"></div>
+      <p class="field-note">Optional. Click again to withdraw it.</p>
+    </div>
+
+    <div class="field">
+      <span class="field-label" id="scareLabel">Scare meter</span>
+      <div class="scare-set" id="scareGroup" role="group" aria-labelledby="scareLabel"></div>
+      <p class="field-note">Optional. Click the current mark to clear.</p>
+    </div>
+
+    <div class="field">
+      <label class="field-label" for="yearWatched">Year watched</label>
+      <input class="text-input" id="yearWatched" type="text" inputmode="numeric" autocomplete="off" placeholder="unrecorded">
+    </div>
+
+    <div class="field">
+      <label class="field-label" for="review">Review</label>
+      <textarea class="text-area" id="review" rows="6" placeholder="Write it down before it fades."></textarea>
+    </div>
+
+    <p class="panel-foot">Held in memory only. A refresh returns everything to its original state.</p>
+  </div>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
