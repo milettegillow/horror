@@ -1,10 +1,11 @@
 /* ============================================================
    horror - a ledger of the gothic
    ------------------------------------------------------------
-   Section 1  Data layer   (swap for API + database later)
-   Section 2  View state
-   Section 3  Rendering
-   Section 4  Events
+   Section 1  Data layer      (swap for API + database later)
+   Section 2  Poster service  (TMDB, through /api/tmdb)
+   Section 3  View state and vocabulary
+   Section 4  Rendering
+   Section 5  Events
    ============================================================ */
 
 
@@ -15,16 +16,19 @@
    knows where films come from. The renderer never touches the
    array directly - it asks Archive for copies and posts changes
    back through Archive.update(). Replacing SEED_FILMS with a
-   fetch() and Archive.update() with a PATCH is the whole job.
+   fetch and Archive.update() with a PATCH is the whole job.
 
    film = {
      id, title, year, director, posterUrl,
-     status:  "to_watch" | "watched" | "banished",
-     verdict: "loved" | "meh" | "nope" | null,
-     scare:   1 | 2 | 3 | null,
-     review:  string,
+     status:    "to_watch" | "watched" | "banished",
+     enjoyment: 1 | 2 | 3 | null,   // how much I liked it
+     fear:      1 | 2 | 3 | null,   // how scary it was
+     review:    string,
      yearWatched: string
    }
+
+   posterUrl starts empty and is filled in at runtime by the
+   poster service below. Until it is, the tile draws its plate.
    ------------------------------------------------------------ */
 
 const SEED_FILMS = [
@@ -35,8 +39,8 @@ const SEED_FILMS = [
     director: 'F. W. Murnau',
     posterUrl: '',
     status: 'watched',
-    verdict: 'loved',
-    scare: 2,
+    enjoyment: 3,
+    fear: 2,
     review: 'The frightening thing is the rhythm - Orlok never gives chase, he simply arrives. A century on and the shadow climbing the staircase still needs no sound to work.',
     yearWatched: '2023'
   },
@@ -47,8 +51,8 @@ const SEED_FILMS = [
     director: 'Carl Theodor Dreyer',
     posterUrl: '',
     status: 'to_watch',
-    verdict: null,
-    scare: null,
+    enjoyment: null,
+    fear: null,
     review: '',
     yearWatched: ''
   },
@@ -59,8 +63,8 @@ const SEED_FILMS = [
     director: 'Mario Bava',
     posterUrl: '',
     status: 'to_watch',
-    verdict: null,
-    scare: null,
+    enjoyment: null,
+    fear: null,
     review: '',
     yearWatched: ''
   },
@@ -71,8 +75,8 @@ const SEED_FILMS = [
     director: 'Jack Clayton',
     posterUrl: '',
     status: 'watched',
-    verdict: 'loved',
-    scare: 3,
+    enjoyment: 3,
+    fear: 3,
     review: 'Ambiguity held for a hundred minutes without once wobbling. Deborah Kerr plays it as devotion rather than hysteria, which is precisely what makes the last shot unbearable.',
     yearWatched: '2024'
   },
@@ -83,8 +87,8 @@ const SEED_FILMS = [
     director: 'Nicolas Roeg',
     posterUrl: '',
     status: 'watched',
-    verdict: 'loved',
-    scare: 3,
+    enjoyment: 3,
+    fear: 2,
     review: 'The editing is the horror. Venice as a cold labyrinth of scaffolding and canal water, and grief filed down until it has an edge.',
     yearWatched: '2024'
   },
@@ -95,8 +99,8 @@ const SEED_FILMS = [
     director: 'Dario Argento',
     posterUrl: '',
     status: 'watched',
-    verdict: 'meh',
-    scare: 2,
+    enjoyment: 1,
+    fear: 3,
     review: '',
     yearWatched: '2022'
   },
@@ -107,8 +111,8 @@ const SEED_FILMS = [
     director: 'Stanley Kubrick',
     posterUrl: '',
     status: 'watched',
-    verdict: 'loved',
-    scare: 3,
+    enjoyment: 3,
+    fear: 2,
     review: 'Colder than it is frightening, and far better for it. The Overlook is a floor plan that refuses to add up and the film trusts you to notice on your own.',
     yearWatched: '2021'
   },
@@ -119,8 +123,8 @@ const SEED_FILMS = [
     director: 'Neil Jordan',
     posterUrl: '',
     status: 'to_watch',
-    verdict: null,
-    scare: null,
+    enjoyment: null,
+    fear: null,
     review: '',
     yearWatched: ''
   },
@@ -131,8 +135,8 @@ const SEED_FILMS = [
     director: 'Francis Ford Coppola',
     posterUrl: '',
     status: 'banished',
-    verdict: 'nope',
-    scare: 1,
+    enjoyment: 1,
+    fear: 1,
     review: 'All that money and not one still moment in it. Sent away for being exhausting rather than for being bad.',
     yearWatched: '2019'
   },
@@ -143,8 +147,8 @@ const SEED_FILMS = [
     director: 'Alejandro Amenábar',
     posterUrl: '',
     status: 'watched',
-    verdict: 'meh',
-    scare: 1,
+    enjoyment: 2,
+    fear: 3,
     review: '',
     yearWatched: '2020'
   },
@@ -155,8 +159,8 @@ const SEED_FILMS = [
     director: 'Guillermo del Toro',
     posterUrl: '',
     status: 'watched',
-    verdict: 'loved',
-    scare: 1,
+    enjoyment: 3,
+    fear: 1,
     review: 'Less a ghost story than a gothic romance that lets the damp show. The house gives the finest performance in it, and the clay does the rest.',
     yearWatched: '2023'
   },
@@ -167,8 +171,8 @@ const SEED_FILMS = [
     director: 'Robert Eggers',
     posterUrl: '',
     status: 'to_watch',
-    verdict: null,
-    scare: null,
+    enjoyment: null,
+    fear: null,
     review: '',
     yearWatched: ''
   },
@@ -179,8 +183,8 @@ const SEED_FILMS = [
     director: 'Ari Aster',
     posterUrl: '',
     status: 'banished',
-    verdict: 'nope',
-    scare: 3,
+    enjoyment: 1,
+    fear: 3,
     review: '',
     yearWatched: '2019'
   },
@@ -191,8 +195,8 @@ const SEED_FILMS = [
     director: 'Rose Glass',
     posterUrl: '',
     status: 'to_watch',
-    verdict: null,
-    scare: null,
+    enjoyment: null,
+    fear: null,
     review: '',
     yearWatched: ''
   }
@@ -204,6 +208,7 @@ const Archive = (function () {
   function copy(film) { return Object.assign({}, film); }
 
   return {
+    all: function () { return films.map(copy); },
     byStatus: function (status) {
       return films
         .filter(function (film) { return film.status === status; })
@@ -228,7 +233,79 @@ const Archive = (function () {
 
 
 /* ------------------------------------------------------------
-   2. VIEW STATE AND VOCABULARY
+   2. POSTER SERVICE
+   ------------------------------------------------------------
+   Posters come from TMDB by way of /api/tmdb, which holds the
+   API key server-side. Results are cached in memory by film id,
+   including misses, so switching tabs never refetches.
+
+   Nothing here can produce a broken image: the URL is loaded
+   into a detached Image first, and only a poster that decodes
+   cleanly is ever put into the grid. Everything else - no
+   network, no result, no key, a dead path - simply leaves the
+   ornamental plate in place.
+   ------------------------------------------------------------ */
+
+const TMDB_ENDPOINT = '/api/tmdb';
+const POSTER_BASE = 'https://image.tmdb.org/t/p/w500';
+
+const Posters = (function () {
+  const cache = new Map();     // film id -> poster URL, or '' for "none found"
+  const pending = new Set();
+
+  function settle(film, url) {
+    pending.delete(film.id);
+    cache.set(film.id, url);
+    if (!url) return;
+    Archive.update(film.id, { posterUrl: url });
+    paintPoster(film.id, url);
+  }
+
+  /* Decode before display, so a tile never flickers through a
+     half-drawn or dead image. */
+  function preload(film, url) {
+    const probe = new Image();
+    probe.onload = function () { settle(film, url); };
+    probe.onerror = function () { settle(film, ''); };
+    probe.src = url;
+  }
+
+  function request(film) {
+    const query = TMDB_ENDPOINT +
+      '?query=' + encodeURIComponent(film.title) +
+      '&year=' + encodeURIComponent(film.year);
+
+    fetch(query)
+      .then(function (response) { return response.ok ? response.json() : null; })
+      .then(function (data) {
+        const results = data && Array.isArray(data.results) ? data.results : [];
+        const first = results[0];
+        const path = first && first.poster_path;
+        if (path) {
+          preload(film, POSTER_BASE + path);
+        } else {
+          settle(film, '');
+        }
+      })
+      .catch(function () { settle(film, ''); });
+  }
+
+  return {
+    urlFor: function (id) { return cache.get(id) || ''; },
+    load: function (film) {
+      if (cache.has(film.id) || pending.has(film.id)) return;
+      pending.add(film.id);
+      request(film);
+    },
+    loadAll: function (films) {
+      films.forEach(function (film) { Posters.load(film); });
+    }
+  };
+})();
+
+
+/* ------------------------------------------------------------
+   3. VIEW STATE AND VOCABULARY
    ------------------------------------------------------------ */
 
 const TABS = [
@@ -244,32 +321,42 @@ const STATUSES = [
   { value: 'banished', label: 'Banished' }
 ];
 
-const VERDICTS = [
-  { value: 'loved', label: 'loved it' },
-  { value: 'meh',   label: 'meh' },
-  { value: 'nope',  label: 'not for me' }
-];
+/* Two independent scales. Both optional, both deselectable. */
+const RATINGS = {
+  enjoyment: {
+    key: 'enjoyment',
+    legend: 'how much I liked it',
+    icon: 'ico-heart',
+    labels: { 1: 'meh', 2: 'liked it', 3: 'loved it' }
+  },
+  fear: {
+    key: 'fear',
+    legend: 'how scary it was',
+    icon: 'ico-ghost',
+    labels: { 1: 'mild', 2: 'unsettling', 3: 'terrifying' }
+  }
+};
 
 const EMPTY_STATES = {
   to_watch: {
     kicker: 'The shelf is bare',
     title: 'Nothing waiting',
-    body: 'Every film has been seen or sent away. Something will turn up.'
+    body: 'Every film has been seen or sent away, and the shelf stands empty for the first time in years. Something will turn up - it always does, usually at an unsociable hour.'
   },
   watched: {
     kicker: 'No records',
     title: 'Nothing watched yet',
-    body: 'The ledger begins the moment you finish the first one.'
+    body: 'The ledger begins the moment you finish the first one. Until then these pages stay blank, which is either restraint or cowardice, depending on the evening.'
   },
   banished: {
     kicker: 'Mercifully quiet',
     title: 'Nothing banished',
-    body: 'No film has yet earned its way out of the collection. Yet.'
+    body: 'No film has yet earned its way out of the collection. Banishment is reserved for the truly unforgivable, and the truly unforgivable has not been screened here yet.'
   },
   discover: {
     kicker: 'Not yet connected',
     title: 'Discover',
-    body: 'This page will surface the top-rated horror and gothic cinema once the archive is connected - the canonical, the neglected and the quietly awful alike.'
+    body: 'Once the archive is connected, this page will surface the top-rated horror and gothic cinema - the canonical, the neglected and the quietly awful alike. Until then it keeps its own counsel, and recommends nothing at all.'
   }
 };
 
@@ -286,15 +373,15 @@ const dom = {
   panelTitle: document.getElementById('panelTitle'),
   panelSub: document.getElementById('panelSub'),
   statusGroup: document.getElementById('statusGroup'),
-  verdictGroup: document.getElementById('verdictGroup'),
-  scareGroup: document.getElementById('scareGroup'),
+  enjoymentGroup: document.getElementById('enjoymentGroup'),
+  fearGroup: document.getElementById('fearGroup'),
   yearWatched: document.getElementById('yearWatched'),
   review: document.getElementById('review')
 };
 
 
 /* ------------------------------------------------------------
-   3. RENDERING
+   4. RENDERING
    ------------------------------------------------------------ */
 
 function esc(value) {
@@ -303,36 +390,33 @@ function esc(value) {
   });
 }
 
-function verdictLabel(value) {
-  const found = VERDICTS.find(function (v) { return v.value === value; });
-  return found ? found.label : '';
+function iconHTML(symbol, filled, modifier) {
+  return '<svg class="icon' + (modifier ? ' ' + modifier : '') + (filled ? ' is-on' : '') +
+    '" viewBox="0 0 24 24" aria-hidden="true"><use href="#' + symbol + '"></use></svg>';
 }
 
-function marksHTML(scare) {
-  let html = '<span class="marks" aria-hidden="true">';
-  for (let i = 1; i <= 3; i += 1) {
-    html += '<span class="mark' + (scare && i <= scare ? ' is-on' : '') + '"></span>';
+/* the small icon rows that sit under a poster */
+function miniRatingHTML(kind, value) {
+  const meta = RATINGS[kind];
+  const reading = meta.legend + ': ' + meta.labels[value] + ' (' + value + ' of 3)';
+  let html = '<span class="rating-mini" data-rating="' + kind + '" title="' + esc(reading) + '">';
+  for (let level = 1; level <= 3; level += 1) {
+    html += iconHTML(meta.icon, level <= value, 'icon--mini');
   }
-  return html + '</span>';
+  return html + '<span class="visually-hidden">' + esc(reading) + '</span></span>';
 }
 
 function tileHTML(film) {
   const hasPoster = Boolean(film.posterUrl);
-  const marks = [];
+  const rows = [];
 
-  if (film.verdict) {
-    marks.push('<span class="tile-verdict">' + esc(verdictLabel(film.verdict)) + '</span>');
-  }
-  if (film.verdict && film.scare) {
-    marks.push('<span class="bar" aria-hidden="true"></span>');
-  }
-  if (film.scare) {
-    marks.push('<span class="scare-hold" title="Scare ' + film.scare + ' of 3">' + marksHTML(film.scare) + '</span>');
-  }
+  if (film.enjoyment) rows.push(miniRatingHTML('enjoyment', film.enjoyment));
+  if (film.enjoyment && film.fear) rows.push('<span class="bar" aria-hidden="true"></span>');
+  if (film.fear) rows.push(miniRatingHTML('fear', film.fear));
 
   const readout = [];
-  if (film.verdict) readout.push(verdictLabel(film.verdict));
-  if (film.scare) readout.push('scare ' + film.scare + ' of 3');
+  if (film.enjoyment) readout.push(RATINGS.enjoyment.labels[film.enjoyment]);
+  if (film.fear) readout.push(RATINGS.fear.labels[film.fear]);
 
   return '' +
     '<article class="tile" role="button" tabindex="0" data-id="' + esc(film.id) + '"' +
@@ -352,7 +436,7 @@ function tileHTML(film) {
       '<div class="tile-meta">' +
         '<h3 class="tile-title">' + esc(film.title) + '</h3>' +
         '<p class="tile-year">' + esc(film.year) + '</p>' +
-        (marks.length ? '<div class="tile-marks">' + marks.join('') + '</div>' : '') +
+        (rows.length ? '<div class="tile-ratings">' + rows.join('') + '</div>' : '') +
       '</div>' +
     '</article>';
 }
@@ -369,15 +453,23 @@ function emptyHTML(key) {
 }
 
 function renderTabs() {
-  dom.tabs.innerHTML = TABS.map(function (tab) {
+  const parts = [];
+
+  TABS.forEach(function (tab, index) {
+    if (index > 0) {
+      parts.push('<span class="tab-sep" aria-hidden="true">' +
+        '<svg viewBox="0 0 24 34"><use href="#orn-fleur"></use></svg></span>');
+    }
     const count = tab.counted ? Archive.count(tab.id) : 0;
-    return '' +
+    parts.push('' +
       '<button class="tab" type="button" role="tab" data-tab="' + tab.id + '"' +
       ' aria-selected="' + (activeTab === tab.id ? 'true' : 'false') + '">' +
         '<span class="tab-label">' + tab.label + '</span>' +
         '<span class="tab-count">' + String(count).padStart(2, '0') + '</span>' +
-      '</button>';
-  }).join('');
+      '</button>');
+  });
+
+  dom.tabs.innerHTML = parts.join('');
 }
 
 function renderCollection() {
@@ -396,8 +488,8 @@ function renderCollection() {
   guardPosters();
 }
 
-/* If a poster path ever fails to load, fall back to the plate
-   rather than leaving a broken image in the grid. */
+/* If a poster ever fails after it has been placed, fall back to
+   the plate rather than leaving a gap in the shelf. */
 function guardPosters() {
   const images = dom.collection.querySelectorAll('.tile-img');
   Array.prototype.forEach.call(images, function (img) {
@@ -409,6 +501,26 @@ function guardPosters() {
   });
 }
 
+/* Drop a freshly loaded poster into a tile already on screen,
+   without rebuilding the grid underneath the reader. */
+function paintPoster(id, url) {
+  const art = dom.collection.querySelector('.tile[data-id="' + id + '"] .tile-art');
+  if (!art || art.classList.contains('has-poster')) return;
+
+  const img = document.createElement('img');
+  img.className = 'tile-img';
+  img.alt = '';
+  img.decoding = 'async';
+  img.src = url;
+  img.addEventListener('error', function () {
+    art.classList.remove('has-poster');
+    img.remove();
+  });
+
+  art.insertBefore(img, art.firstChild);
+  art.classList.add('has-poster');
+}
+
 function render() {
   renderTabs();
   renderCollection();
@@ -417,32 +529,39 @@ function render() {
 
 /* ---- panel ---- */
 
-function optionHTML(value, label, pressed, kind) {
-  return '' +
-    '<button class="opt" type="button" data-' + kind + '="' + esc(value) + '"' +
-    ' aria-pressed="' + (pressed ? 'true' : 'false') + '">' + esc(label) + '</button>';
+function renderStatusGroup(film) {
+  dom.statusGroup.innerHTML = STATUSES.map(function (status) {
+    return '<button class="opt" type="button" data-status="' + esc(status.value) + '"' +
+      ' aria-pressed="' + (film.status === status.value ? 'true' : 'false') + '">' +
+      esc(status.label) + '</button>';
+  }).join('');
+}
+
+function renderRatingGroup(kind, value) {
+  const meta = RATINGS[kind];
+  let html = '';
+
+  for (let level = 1; level <= 3; level += 1) {
+    html += '' +
+      '<button class="rate-btn" type="button" data-level="' + level + '"' +
+      ' aria-pressed="' + (value === level ? 'true' : 'false') + '"' +
+      ' title="' + esc(meta.labels[level]) + '"' +
+      ' aria-label="' + esc(meta.labels[level] + ' - ' + level + ' of 3, ' + meta.legend) + '">' +
+        iconHTML(meta.icon, Boolean(value) && level <= value) +
+      '</button>';
+  }
+
+  html += '<span class="rate-read' + (value ? ' is-set' : '') + '">' +
+    esc(value ? meta.labels[value] : 'unrated') + '</span>';
+
+  const group = kind === 'enjoyment' ? dom.enjoymentGroup : dom.fearGroup;
+  group.innerHTML = html;
 }
 
 function renderPanelControls(film) {
-  dom.statusGroup.innerHTML = STATUSES.map(function (status) {
-    return optionHTML(status.value, status.label, film.status === status.value, 'status');
-  }).join('');
-
-  dom.verdictGroup.innerHTML = VERDICTS.map(function (verdict) {
-    return optionHTML(verdict.value, verdict.label, film.verdict === verdict.value, 'verdict');
-  }).join('');
-
-  let scareHTML = '';
-  for (let level = 1; level <= 3; level += 1) {
-    scareHTML += '' +
-      '<button class="scare-btn" type="button" data-scare="' + level + '"' +
-      ' aria-pressed="' + (film.scare === level ? 'true' : 'false') + '"' +
-      ' aria-label="Scare ' + level + ' of 3">' +
-        '<span class="mark' + (film.scare && level <= film.scare ? ' is-on' : '') + '"></span>' +
-      '</button>';
-  }
-  scareHTML += '<span class="scare-read">' + (film.scare ? film.scare + ' of 3' : 'unrated') + '</span>';
-  dom.scareGroup.innerHTML = scareHTML;
+  renderStatusGroup(film);
+  renderRatingGroup('enjoyment', film.enjoyment);
+  renderRatingGroup('fear', film.fear);
 }
 
 function openPanel(id) {
@@ -496,7 +615,7 @@ function commit(patch, refreshControls) {
 
 
 /* ------------------------------------------------------------
-   4. EVENTS
+   5. EVENTS
    ------------------------------------------------------------ */
 
 dom.tabs.addEventListener('click', function (event) {
@@ -536,16 +655,32 @@ dom.panel.addEventListener('click', function (event) {
     return;
   }
 
-  if (button.dataset.verdict) {
-    const next = film.verdict === button.dataset.verdict ? null : button.dataset.verdict;
-    commit({ verdict: next }, true);
-    return;
+  const group = button.closest('[data-rating]');
+  if (group && button.dataset.level) {
+    const kind = group.dataset.rating;
+    const level = Number(button.dataset.level);
+    const patch = {};
+    patch[kind] = film[kind] === level ? null : level;   // click the active value to clear
+    commit(patch, true);
   }
+});
 
-  if (button.dataset.scare) {
-    const level = Number(button.dataset.scare);
-    commit({ scare: film.scare === level ? null : level }, true);
-  }
+/* Hovering a rating previews that rung's label in the readout. */
+dom.panel.addEventListener('mouseover', function (event) {
+  const button = event.target.closest('.rate-btn');
+  if (!button) return;
+  const group = button.closest('[data-rating]');
+  const read = group && group.querySelector('.rate-read');
+  if (!read) return;
+  read.textContent = RATINGS[group.dataset.rating].labels[Number(button.dataset.level)];
+  read.classList.add('is-set');
+});
+
+dom.panel.addEventListener('mouseout', function (event) {
+  const group = event.target.closest('[data-rating]');
+  if (!group || group.contains(event.relatedTarget)) return;
+  const film = Archive.get(openFilmId);
+  if (film) renderRatingGroup(group.dataset.rating, film[group.dataset.rating]);
 });
 
 dom.yearWatched.addEventListener('input', function () {
@@ -565,3 +700,4 @@ document.addEventListener('keydown', function (event) {
 });
 
 render();
+Posters.loadAll(Archive.all());
