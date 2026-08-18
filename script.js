@@ -167,6 +167,31 @@ const Store = (function () {
    ------------------------------------------------------------ */
 
 
+const YEAR_WATCHED_FLOOR = 1994;
+
+/* Years run from this one down to the floor, generated rather than
+   written out, so the list is still right in ten years' time. An
+   unexpected stored value is kept as its own option rather than
+   being quietly dropped. */
+function yearOptionsHTML(selected) {
+  const now = new Date().getFullYear();
+  const years = [];
+
+  for (let year = now; year >= YEAR_WATCHED_FLOOR; year -= 1) years.push(String(year));
+  if (selected && years.indexOf(selected) === -1) years.unshift(selected);
+
+  return '<option value="">not recorded</option>' + years.map(function (year) {
+    return '<option value="' + esc(year) + '">' + esc(year) + '</option>';
+  }).join('');
+}
+
+/* A four-digit yearWatched as a number, or null for anything
+   blank or unparseable. */
+function watchedYear(film) {
+  const raw = film && typeof film.yearWatched === 'string' ? film.yearWatched.trim() : '';
+  return /^\d{4}$/.test(raw) ? Number(raw) : null;
+}
+
 const Archive = (function () {
   let films = [];
 
@@ -178,11 +203,31 @@ const Archive = (function () {
     hydrate: function (incoming) { films = incoming.map(copy); },
 
     all: function () { return films.map(copy); },
+    /* Watched is ordered by the year it was watched, most recent
+       first, with anything unrecorded after the lot rather than
+       treated as year nought. Everything else, and every tie, falls
+       back on order added - most recent first. Release year is
+       shown on the tiles but never sorts anything. */
     byStatus: function (status) {
-      return films
-        .filter(function (film) { return film.status === status; })
-        .sort(function (a, b) { return (a.year || 0) - (b.year || 0); })
-        .map(copy);
+      const held = films
+        .map(function (film, index) { return { film: film, index: index }; })
+        .filter(function (entry) { return entry.film.status === status; });
+
+      held.sort(function (a, b) {
+        if (status === 'watched') {
+          const seenA = watchedYear(a.film);
+          const seenB = watchedYear(b.film);
+
+          if (seenA !== seenB) {
+            if (seenA === null) return 1;    // unrecorded sinks
+            if (seenB === null) return -1;
+            return seenB - seenA;            // most recent first
+          }
+        }
+        return b.index - a.index;            // most recently added first
+      });
+
+      return held.map(function (entry) { return copy(entry.film); });
     },
     get: function (id) {
       const film = films.find(function (f) { return f.id === id; });
@@ -519,6 +564,7 @@ const dom = {
   enjoymentGroup: document.getElementById('enjoymentGroup'),
   fearGroup: document.getElementById('fearGroup'),
   yearWatched: document.getElementById('yearWatched'),
+  yearField: document.getElementById('yearField'),
   review: document.getElementById('review'),
   panelTmdb: document.getElementById('panelTmdb'),
   panelScore: document.getElementById('panelScore'),
@@ -1348,10 +1394,19 @@ function renderRatingGroup(kind, value) {
   group.innerHTML = html;
 }
 
+/* The year only means anything once a film has been watched. */
+function renderYearField(film) {
+  const value = film.yearWatched || '';
+  dom.yearWatched.innerHTML = yearOptionsHTML(value);
+  dom.yearWatched.value = value;
+  dom.yearField.hidden = film.status !== 'watched';
+}
+
 function renderPanelControls(film) {
   renderStatusGroup(film);
   renderRatingGroup('enjoyment', film.enjoyment);
   renderRatingGroup('fear', film.fear);
+  renderYearField(film);
 }
 
 function currentFilm() {
@@ -1396,7 +1451,6 @@ function openEntry(film, detail) {
   if (dom.scrim.hidden) lastFocused = document.activeElement;
 
   dom.panelTitle.textContent = film.title;
-  dom.yearWatched.value = film.yearWatched || '';
   dom.review.value = film.review || '';
   renderPanelControls(film);
   renderPanelDetail(film);
@@ -1842,7 +1896,7 @@ dom.panel.addEventListener('mouseout', function (event) {
   if (film) renderRatingGroup(group.dataset.rating, film[group.dataset.rating]);
 });
 
-dom.yearWatched.addEventListener('input', function () {
+dom.yearWatched.addEventListener('change', function () {
   commit({ yearWatched: dom.yearWatched.value }, false);
 });
 

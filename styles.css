@@ -948,7 +948,8 @@ button { cursor: pointer; }
 
 button:disabled,
 .text-input:disabled,
-.text-area:disabled {
+.text-area:disabled,
+.select-input:disabled {
   opacity: 0.34;
   cursor: not-allowed;
 }
@@ -1176,6 +1177,63 @@ button:disabled,
 }
 .opt[aria-pressed="true"]:not(:disabled):hover {
   background: rgba(122, 18, 32, 0.72);
+}
+
+/* ---------- the year dropdown ---------- */
+
+.field[hidden] { display: none; }
+
+.select-shell {
+  position: relative;
+  display: block;
+}
+
+/* the arrow, drawn rather than left to the browser */
+.select-shell::after {
+  content: "";
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  margin-top: -7px;
+  border-right: 1px solid var(--gold-dim);
+  border-bottom: 1px solid var(--gold-dim);
+  transform: rotate(45deg);
+  pointer-events: none;
+  transition: border-color var(--ease);
+}
+.select-shell:focus-within::after { border-color: var(--gold); }
+
+.select-input {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  display: block;
+  width: 100%;
+  padding: 9px 26px 9px 0;
+  /* the panel's own near-black, so the control reads as a ruled
+     line rather than a box dropped onto the page */
+  background: var(--ink-panel);
+  border: 0;
+  border-bottom: 1px solid var(--gold-faint);
+  color: var(--ivory);
+  font-family: var(--serif-body);
+  font-size: 1rem;
+  cursor: pointer;
+  transition: border-color var(--ease);
+}
+.select-input:focus {
+  outline: none;
+  border-bottom-color: var(--gold-dim);
+}
+.select-input:focus-visible { outline: none; }
+.select-input:disabled { cursor: not-allowed; }
+
+/* the open list is drawn by the platform; these land where they can */
+.select-input option {
+  background: var(--ink-panel);
+  color: var(--ivory);
 }
 
 .text-input,
