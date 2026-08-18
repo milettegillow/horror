@@ -6,6 +6,7 @@
 
      /api/tmdb?query=Suspiria   search, returns TMDB's payload
      /api/tmdb?id=11324         lookup, returns one movie
+     /api/tmdb?mode=discover    top-rated horror, paged
 
    A film is searched for once. After that the client holds its
    TMDB id and comes back through the lookup path, which is exact
@@ -14,6 +15,11 @@
 
 const TMDB_SEARCH = 'https://api.themoviedb.org/3/search/movie';
 const TMDB_MOVIE = 'https://api.themoviedb.org/3/movie/';
+const TMDB_DISCOVER = 'https://api.themoviedb.org/3/discover/movie';
+
+const HORROR_GENRE = '27';
+const DEFAULT_VOTE_FLOOR = '300';   // below this, obscure titles top a vote_average sort
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 module.exports = async function handler(request, response) {
   const key = process.env.TMDB_KEY;
@@ -26,15 +32,39 @@ module.exports = async function handler(request, response) {
   const params = request.query || {};
   const query = typeof params.query === 'string' ? params.query.trim() : '';
   const id = typeof params.id === 'string' ? params.id.trim() : '';
+  const mode = typeof params.mode === 'string' ? params.mode.trim() : '';
 
-  if (!query && !id) {
-    response.status(400).json({ error: 'A query or id parameter is required.' });
+  if (!query && !id && mode !== 'discover') {
+    response.status(400).json({ error: 'A query, id or mode parameter is required.' });
     return;
   }
 
   let url;
 
-  if (id) {
+  if (mode === 'discover') {
+    const page = String(params.page || '1');
+    const floor = String(params['vote_count.gte'] || DEFAULT_VOTE_FLOOR);
+    const from = String(params['primary_release_date.gte'] || '');
+    const to = String(params['primary_release_date.lte'] || '');
+
+    if (!/^\d{1,3}$/.test(page) || Number(page) < 1 || Number(page) > 500) {
+      response.status(400).json({ error: 'page must be between 1 and 500.' });
+      return;
+    }
+    if (!/^\d{1,7}$/.test(floor)) {
+      response.status(400).json({ error: 'vote_count.gte must be a number.' });
+      return;
+    }
+
+    url = new URL(TMDB_DISCOVER);
+    url.searchParams.set('with_genres', HORROR_GENRE);
+    url.searchParams.set('sort_by', 'vote_average.desc');
+    url.searchParams.set('vote_count.gte', floor);
+    url.searchParams.set('page', page);
+    url.searchParams.set('include_adult', 'false');
+    if (ISO_DATE.test(from)) url.searchParams.set('primary_release_date.gte', from);
+    if (ISO_DATE.test(to)) url.searchParams.set('primary_release_date.lte', to);
+  } else if (id) {
     if (!/^\d+$/.test(id)) {
       response.status(400).json({ error: 'id must be a TMDB movie id.' });
       return;

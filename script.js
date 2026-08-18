@@ -228,7 +228,7 @@ const Archive = (function () {
     byStatus: function (status) {
       return films
         .filter(function (film) { return film.status === status; })
-        .sort(function (a, b) { return a.year - b.year; })
+        .sort(function (a, b) { return (a.year || 0) - (b.year || 0); })
         .map(copy);
     },
     get: function (id) {
@@ -237,6 +237,11 @@ const Archive = (function () {
     },
     count: function (status) {
       return films.filter(function (film) { return film.status === status; }).length;
+    },
+    add: function (film) {
+      if (films.some(function (existing) { return existing.id === film.id; })) return null;
+      films.push(Object.assign({}, film));
+      return copy(film);
     },
     update: function (id, patch) {
       const film = films.find(function (f) { return f.id === id; });
@@ -452,6 +457,42 @@ const RATINGS = {
   }
 };
 
+/* Discover: decade windows and the client-side rating floor */
+const DECADES = [
+  { value: 'all', label: 'All' },
+  { value: '1920', label: '1920s' }, { value: '1930', label: '1930s' },
+  { value: '1940', label: '1940s' }, { value: '1950', label: '1950s' },
+  { value: '1960', label: '1960s' }, { value: '1970', label: '1970s' },
+  { value: '1980', label: '1980s' }, { value: '1990', label: '1990s' },
+  { value: '2000', label: '2000s' }, { value: '2010', label: '2010s' },
+  { value: '2020', label: '2020s' }
+];
+
+const RATING_FLOORS = [
+  { value: 'all', label: 'All' },
+  { value: '6', label: '6+' },
+  { value: '7', label: '7+' },
+  { value: '8', label: '8+' }
+];
+
+const DISCOVER_STATES = {
+  loading: {
+    kicker: 'Consulting the archive',
+    title: 'Turning the pages',
+    body: 'Sorting the highly regarded from the merely notorious. This takes a moment - the archive is large and its cataloguing is eccentric.'
+  },
+  empty: {
+    kicker: 'Nothing further',
+    title: 'The well is dry',
+    body: 'Everything the archive will admit to at this rating is already on your shelves, or was never worth admitting to. Loosen the decade, lower the rating, or take the hint and go to bed.'
+  },
+  error: {
+    kicker: 'No reply',
+    title: 'The archive stays shut',
+    body: 'The request went out and nothing came back. This is usually a missing key or a lost connection rather than anything sinister, though one can never be certain.'
+  }
+};
+
 const EMPTY_STATES = {
   to_watch: {
     kicker: 'The shelf is bare',
@@ -467,11 +508,6 @@ const EMPTY_STATES = {
     kicker: 'Mercifully quiet',
     title: 'Nothing banished',
     body: 'No film has yet earned its way out of the collection. Banishment is reserved for the truly unforgivable, and the truly unforgivable has not been screened here yet.'
-  },
-  discover: {
-    kicker: 'Not yet connected',
-    title: 'Discover',
-    body: 'Once the archive is connected, this page will surface the top-rated horror and gothic cinema - the canonical, the neglected and the quietly awful alike. Until then it keeps its own counsel, and recommends nothing at all.'
   }
 };
 
@@ -493,6 +529,180 @@ const dom = {
   yearWatched: document.getElementById('yearWatched'),
   review: document.getElementById('review')
 };
+
+
+
+/* ------------------------------------------------------------
+   DISCOVER
+   ------------------------------------------------------------
+   Top-rated horror from TMDB, minus anything already on the
+   shelves. Filtering shrinks each page, so a fill keeps pulling
+   pages until the grid has enough or the cap is reached.
+   ------------------------------------------------------------ */
+
+const DISCOVER_TARGET = 20;      // results wanted per fill
+const DISCOVER_MAX_PAGES = 6;    // pages crawled per fill, so a heavily
+                                 // filtered decade cannot spin forever
+
+const Discover = (function () {
+  const state = {
+    decade: 'all',
+    minRating: 'all',
+    page: 0,
+    results: [],
+    seen: new Set(),
+    status: 'idle',      // idle | loading | more | ready | error
+    reason: '',
+    exhausted: false
+  };
+
+  function decadeWindow(decade) {
+    if (decade === 'all') return null;
+    const start = Number(decade);
+    return { from: start + '-01-01', to: (start + 9) + '-12-31' };
+  }
+
+  function endpoint(page) {
+    const parts = ['mode=discover', 'page=' + page];
+    const window = decadeWindow(state.decade);
+    if (window) {
+      parts.push('primary_release_date.gte=' + window.from);
+      parts.push('primary_release_date.lte=' + window.to);
+    }
+    return TMDB_ENDPOINT + '?' + parts.join('&');
+  }
+
+  /* Everything already on the shelves, by TMDB id where we have one.
+     Title and year is a backstop for films whose poster lookup has
+     not landed yet, so a seed film cannot briefly reappear here. */
+  function collected() {
+    const ids = new Set();
+    const names = new Set();
+    Archive.all().forEach(function (film) {
+      if (film.tmdbId) ids.add(film.tmdbId);
+      names.add(normalise(film.title) + '|' + film.year);
+    });
+    return { ids: ids, names: names };
+  }
+
+  function eligible(results) {
+    const mine = collected();
+    const floor = state.minRating === 'all' ? 0 : Number(state.minRating);
+
+    return results.filter(function (result) {
+      if (!result || !result.id) return false;
+      if (state.seen.has(result.id)) return false;
+      if (mine.ids.has(result.id)) return false;
+
+      const year = Number(String(result.release_date || '').slice(0, 4)) || null;
+      if (mine.names.has(normalise(result.title) + '|' + year)) return false;
+      if ((Number(result.vote_average) || 0) < floor) return false;
+
+      state.seen.add(result.id);
+      return true;
+    });
+  }
+
+  function fetchPage(page) {
+    return fetch(endpoint(page))
+      .then(function (response) {
+        if (!response.ok) throw new Error('the archive replied ' + response.status);
+        return response.json();
+      })
+      .then(function (data) {
+        return {
+          results: Array.isArray(data.results) ? data.results : [],
+          totalPages: Number(data.total_pages) || 1
+        };
+      });
+  }
+
+  /* Pull pages until the grid is full enough or the cap is hit. */
+  async function fill(fresh) {
+    if (fresh) {
+      state.results = [];
+      state.seen = new Set();
+      state.page = 0;
+      state.exhausted = false;
+    }
+
+    state.status = fresh ? 'loading' : 'more';
+    state.reason = '';
+    renderCollection();
+
+    const want = state.results.length + DISCOVER_TARGET;
+    let pages = 0;
+
+    try {
+      while (state.results.length < want && pages < DISCOVER_MAX_PAGES && !state.exhausted) {
+        const page = state.page + 1;
+        const payload = await fetchPage(page);
+
+        state.page = page;
+        pages += 1;
+        if (page >= payload.totalPages || payload.results.length === 0) state.exhausted = true;
+
+        state.results = state.results.concat(eligible(payload.results));
+      }
+      state.status = 'ready';
+    } catch (error) {
+      state.status = 'error';
+      state.reason = error && error.message ? error.message : 'the request failed';
+    }
+
+    renderCollection();
+  }
+
+  return {
+    snapshot: function () { return state; },
+    find: function (tmdbId) {
+      return state.results.filter(function (result) { return result.id === tmdbId; })[0] || null;
+    },
+    kick: function () { if (state.status === 'idle') fill(true); },
+    retry: function () { fill(true); },
+    more: function () { if (state.status === 'ready' && !state.exhausted) fill(false); },
+    setFilter: function (kind, value) {
+      if (kind === 'decade' && state.decade === value) return;
+      if (kind === 'rating' && state.minRating === value) return;
+      if (kind === 'decade') state.decade = value;
+      if (kind === 'rating') state.minRating = value;
+      fill(true);
+    },
+    /* Fade the tile out, then drop it from state. */
+    dismiss: function (tmdbId) {
+      state.results = state.results.filter(function (result) { return result.id !== tmdbId; });
+      const tile = dom.collection.querySelector('.tile--discover[data-tmdb="' + tmdbId + '"]');
+      if (!tile) return;
+      tile.classList.add('is-leaving');
+      window.setTimeout(function () {
+        if (tile.parentNode) tile.parentNode.removeChild(tile);
+      }, 280);
+    }
+  };
+})();
+
+/* Take a Discover result onto the shelves at the given status. */
+function adopt(tmdbId, status) {
+  const result = Discover.find(tmdbId);
+  if (!result) return;
+
+  Archive.add({
+    id: 'tmdb-' + tmdbId,
+    title: result.title || 'Untitled',
+    year: Number(String(result.release_date || '').slice(0, 4)) || null,
+    director: '',
+    posterUrl: result.poster_path ? POSTER_BASE + result.poster_path : '',
+    tmdbId: tmdbId,
+    status: status,
+    enjoyment: null,
+    fear: null,
+    review: '',
+    yearWatched: ''
+  });
+
+  renderTabs();
+  Discover.dismiss(tmdbId);
+}
 
 
 /* ------------------------------------------------------------
@@ -567,6 +777,109 @@ function emptyHTML(key) {
     '</div>';
 }
 
+/* ---- Discover view ---- */
+
+function discoverControlsHTML() {
+  const state = Discover.snapshot();
+  const rows = [
+    { kind: 'decade', label: 'Decade', options: DECADES, active: state.decade },
+    { kind: 'rating', label: 'Minimum rating', options: RATING_FLOORS, active: state.minRating }
+  ];
+
+  return '<div class="disc-controls">' + rows.map(function (row) {
+    return '' +
+      '<div class="control-row">' +
+        '<span class="control-label" id="ctl-' + row.kind + '">' + esc(row.label) + '</span>' +
+        '<div class="control-set" role="group" aria-labelledby="ctl-' + row.kind + '">' +
+          row.options.map(function (option) {
+            const on = row.active === option.value;
+            return '<button class="control-opt" type="button"' +
+              ' data-discover-filter="' + row.kind + '" data-value="' + esc(option.value) + '"' +
+              ' aria-pressed="' + (on ? 'true' : 'false') + '">' + esc(option.label) + '</button>';
+          }).join('') +
+        '</div>' +
+      '</div>';
+  }).join('') + '</div>';
+}
+
+function discoverTileHTML(result) {
+  const year = Number(String(result.release_date || '').slice(0, 4)) || null;
+  const poster = result.poster_path ? POSTER_BASE + result.poster_path : '';
+  const score = (Number(result.vote_average) || 0).toFixed(1);
+  const title = result.title || 'Untitled';
+
+  return '' +
+    '<article class="tile tile--discover" data-tmdb="' + esc(result.id) + '">' +
+      '<div class="tile-art' + (poster ? ' has-poster' : '') + '">' +
+        (poster ? '<img class="tile-img" src="' + esc(poster) + '" alt="" loading="lazy" decoding="async">' : '') +
+        '<div class="plate">' +
+          '<span class="plate-mark" aria-hidden="true"></span>' +
+          '<span class="plate-title">' + esc(title) + '</span>' +
+          '<span class="plate-rule" aria-hidden="true"></span>' +
+          '<span class="plate-year">' + esc(year || '') + '</span>' +
+        '</div>' +
+        '<div class="tile-actions">' +
+          '<button class="tile-action" type="button" data-discover-add="to_watch" data-tmdb="' + esc(result.id) + '">' +
+            'add to watchlist</button>' +
+          '<button class="tile-action tile-action--banish" type="button" data-discover-add="banished" data-tmdb="' + esc(result.id) + '">' +
+            'banish</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="tile-meta">' +
+        '<h3 class="tile-title">' + esc(title) + '</h3>' +
+        '<p class="tile-year">' + esc(year || 'undated') + '</p>' +
+        '<p class="tmdb-score">' +
+          '<span class="tmdb-label">TMDB score</span>' +
+          '<span class="tmdb-value">' + esc(score) + '</span>' +
+        '</p>' +
+      '</div>' +
+    '</article>';
+}
+
+function discoverNoteHTML(key, extra) {
+  const copy = DISCOVER_STATES[key];
+  return '' +
+    '<div class="empty empty--' + key + '">' +
+      '<div class="empty-mark" aria-hidden="true"></div>' +
+      '<p class="empty-kicker">' + esc(copy.kicker) + '</p>' +
+      '<h2 class="empty-title">' + esc(copy.title) + '</h2>' +
+      '<p class="empty-body">' + esc(copy.body) + '</p>' +
+      (extra || '') +
+    '</div>';
+}
+
+function loadMoreHTML(busy) {
+  return '' +
+    '<div class="load-more">' +
+      '<span class="rule-line"></span>' +
+      '<span class="diamond" aria-hidden="true"></span>' +
+      '<button class="load-more-btn" type="button" data-discover-more' + (busy ? ' disabled' : '') + '>' +
+        (busy ? 'gathering' : 'load more') + '</button>' +
+      '<span class="diamond" aria-hidden="true"></span>' +
+      '<span class="rule-line"></span>' +
+    '</div>';
+}
+
+function discoverHTML() {
+  const state = Discover.snapshot();
+  let body = '';
+
+  if (state.status === 'loading') {
+    body = discoverNoteHTML('loading');
+  } else if (state.status === 'error') {
+    body = discoverNoteHTML('error',
+      '<p class="empty-reason">' + esc(state.reason) + '</p>' +
+      '<button class="ghost-btn" type="button" data-discover-retry>try again</button>');
+  } else if (!state.results.length) {
+    body = discoverNoteHTML('empty');
+  } else {
+    body = '<div class="grid">' + state.results.map(discoverTileHTML).join('') + '</div>' +
+      (state.exhausted ? '' : loadMoreHTML(state.status === 'more'));
+  }
+
+  return discoverControlsHTML() + body;
+}
+
 function renderTabs() {
   const parts = [];
 
@@ -589,7 +902,9 @@ function renderTabs() {
 
 function renderCollection() {
   if (activeTab === 'discover') {
-    dom.collection.innerHTML = emptyHTML('discover');
+    dom.collection.innerHTML = discoverHTML();
+    guardPosters();
+    Discover.kick();          // no-op unless nothing has been fetched yet
     return;
   }
 
@@ -687,7 +1002,9 @@ function openPanel(id) {
   lastFocused = document.activeElement;
 
   dom.panelTitle.textContent = film.title;
-  dom.panelSub.textContent = film.year + ' - directed by ' + film.director;
+  dom.panelSub.textContent = film.director
+    ? film.year + ' - directed by ' + film.director
+    : String(film.year || 'year unknown');
   dom.yearWatched.value = film.yearWatched || '';
   dom.review.value = film.review || '';
   renderPanelControls(film);
@@ -741,14 +1058,29 @@ dom.tabs.addEventListener('click', function (event) {
 });
 
 dom.collection.addEventListener('click', function (event) {
+  const filter = event.target.closest('[data-discover-filter]');
+  if (filter) {
+    Discover.setFilter(filter.dataset.discoverFilter, filter.dataset.value);
+    return;
+  }
+
+  if (event.target.closest('[data-discover-more]')) { Discover.more(); return; }
+  if (event.target.closest('[data-discover-retry]')) { Discover.retry(); return; }
+
+  const action = event.target.closest('[data-discover-add]');
+  if (action) {
+    adopt(Number(action.dataset.tmdb), action.dataset.discoverAdd);
+    return;
+  }
+
   const tile = event.target.closest('.tile');
-  if (tile) openPanel(tile.dataset.id);
+  if (tile && tile.dataset.id) openPanel(tile.dataset.id);
 });
 
 dom.collection.addEventListener('keydown', function (event) {
   if (event.key !== 'Enter' && event.key !== ' ') return;
   const tile = event.target.closest('.tile');
-  if (!tile) return;
+  if (!tile || !tile.dataset.id) return;
   event.preventDefault();
   openPanel(tile.dataset.id);
 });

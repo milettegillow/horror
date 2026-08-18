@@ -13,7 +13,8 @@ framework, no dependencies beyond Google Fonts.
 ## Running it
 
 Opening `index.html` directly works, but `/api/tmdb` will not resolve, so every
-tile falls back to its ornamental plate. To see real posters:
+tile falls back to its ornamental plate and Discover shows its error state. To
+see real posters and recommendations:
 
     npm i -g vercel
     cp .env.example .env        # then paste your TMDB key into it

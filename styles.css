@@ -544,6 +544,198 @@ button { cursor: pointer; }
 .rate-read.is-set { color: var(--gold); }
 
 /* ============================================================
+   Discover: filters, result tiles, load more
+   ============================================================ */
+
+.disc-controls {
+  margin-bottom: clamp(28px, 4vw, 42px);
+  padding-bottom: clamp(20px, 3vw, 28px);
+  border-bottom: 1px solid var(--gold-faint);
+}
+
+.control-row {
+  display: flex;
+  align-items: baseline;
+  gap: clamp(14px, 3vw, 30px);
+  padding: 7px 0;
+}
+
+.control-label {
+  flex: 0 0 auto;
+  min-width: 8.5em;
+  font-size: 0.6rem;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--gold);
+}
+
+.control-set {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+}
+
+.control-opt {
+  padding: 4px 2px 7px;
+  border-bottom: 2px solid transparent;
+  color: var(--ivory-dim);
+  font-family: var(--serif-body);
+  font-size: 0.64rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  transition: color var(--ease), border-color var(--ease);
+}
+.control-opt:hover { color: var(--ivory); }
+.control-opt[aria-pressed="true"] {
+  color: var(--ivory);
+  border-bottom-color: var(--oxblood);
+}
+
+@media (max-width: 640px) {
+  .control-row { flex-direction: column; gap: 8px; }
+  .control-label { min-width: 0; }
+}
+
+/* ---- result tiles ---- */
+
+.tile--discover { cursor: default; }
+
+.tile--discover .tile-art { z-index: 0; }
+.tile-art.has-poster::after { z-index: 1; }
+
+.tile-actions {
+  position: absolute;
+  z-index: 2;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  opacity: 0;
+  background: linear-gradient(to top, rgba(7, 5, 6, 0.97) 0%, rgba(7, 5, 6, 0.92) 48%, rgba(7, 5, 6, 0.55) 78%, rgba(7, 5, 6, 0) 100%);
+  transition: opacity var(--ease);
+}
+.tile--discover:hover .tile-actions,
+.tile--discover:focus-within .tile-actions { opacity: 1; }
+
+/* no hover to rely on: keep the actions on show */
+@media (hover: none) {
+  .tile-actions { opacity: 1; }
+}
+
+.tile-action {
+  padding: 8px 6px;
+  border: 1px solid var(--gold-faint);
+  background: var(--ink);
+  color: var(--ivory-dim);
+  font-family: var(--serif-body);
+  font-size: 0.58rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  transition: color var(--ease), border-color var(--ease), background-color var(--ease);
+}
+.tile-action:hover {
+  color: var(--ivory);
+  background: var(--oxblood);
+  border-color: var(--oxblood-lift);
+}
+.tile-action--banish:hover {
+  background: var(--ink);
+  border-color: var(--oxblood-lift);
+  color: var(--oxblood-lift);
+}
+
+.tmdb-score {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 9px;
+  font-size: 0.6rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+.tmdb-label { color: rgba(184, 155, 94, 0.72); }
+.tmdb-value {
+  color: var(--ivory-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* a tile leaving for the shelves */
+.tile.is-leaving {
+  opacity: 0;
+  transform: translateY(6px);
+  pointer-events: none;
+  transition: opacity 260ms ease, transform 260ms ease;
+}
+
+/* ---- load more, set into a rule ---- */
+
+.load-more {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: clamp(38px, 5vw, 56px);
+}
+.load-more-btn {
+  padding: 9px 20px;
+  border: 1px solid var(--gold-faint);
+  color: var(--ivory-dim);
+  font-family: var(--serif-body);
+  font-size: 0.6rem;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  transition: color var(--ease), border-color var(--ease), background-color var(--ease);
+}
+.load-more-btn:hover:not(:disabled) {
+  color: var(--ivory);
+  border-color: var(--gold-line);
+  background: rgba(122, 18, 32, 0.16);
+}
+.load-more-btn:disabled {
+  color: var(--ivory-faint);
+  cursor: default;
+}
+
+/* ---- state blocks ---- */
+
+.empty-reason {
+  margin-top: 16px;
+  font-size: 0.68rem;
+  font-style: italic;
+  color: var(--ivory-faint);
+}
+
+.ghost-btn {
+  margin-top: 22px;
+  padding: 9px 22px;
+  border: 1px solid var(--gold-line);
+  color: var(--ivory-dim);
+  font-family: var(--serif-body);
+  font-size: 0.6rem;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  transition: color var(--ease), border-color var(--ease), background-color var(--ease);
+}
+.ghost-btn:hover {
+  color: var(--ivory);
+  background: var(--oxblood);
+  border-color: var(--oxblood-lift);
+}
+
+.empty--loading .empty-mark {
+  animation: breathe 2.6s ease-in-out infinite;
+}
+@keyframes breathe {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .empty--loading .empty-mark { animation: none; }
+}
+
+/* ============================================================
    Empty states and Discover
    ============================================================ */
 
