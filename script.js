@@ -325,13 +325,17 @@ const Archive = (function () {
        back on order added - most recent first. Release year is
        shown on the tiles but never sorts anything. */
     /* Watched is ordered by whichever sort the reader has chosen.
-       To Watch and Banished stay on order added, most recent first. */
+       To Watch runs by release year, newest first - a waiting list
+       reads better as a shelf than as a pile. Banished stays on
+       order added, most recent first. */
     byStatus: function (status, sort) {
       const held = films
         .map(function (film, index) { return { film: film, index: index }; })
         .filter(function (entry) { return entry.film.status === status; });
 
-      const compare = status === 'watched' ? watchedComparator(sort) : null;
+      let compare = null;
+      if (status === 'watched') compare = watchedComparator(sort);
+      else if (status === 'to_watch') compare = compareByRelease;
 
       held.sort(function (a, b) {
         if (compare) {
