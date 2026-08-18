@@ -45,6 +45,40 @@ const Auth = (function () {
   };
 })();
 
+/* View preferences live in this browser, not in the archive - they
+   are how one reader likes to look at the collection, not part of
+   the collection itself. The only localStorage in the app, and it
+   is confined here. */
+const Prefs = (function () {
+  const KEY = 'horror.prefs.v1';
+
+  function read() {
+    try {
+      const raw = window.localStorage.getItem(KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (error) {
+      return {};
+    }
+  }
+
+  return {
+    get: function (name, fallback) {
+      const value = read()[name];
+      return value === undefined ? fallback : value;
+    },
+    set: function (name, value) {
+      const all = read();
+      all[name] = value;
+      try {
+        window.localStorage.setItem(KEY, JSON.stringify(all));
+      } catch (error) {
+        /* storage refused: the choice simply lasts this visit */
+      }
+    }
+  };
+})();
+
 const Store = (function () {
   const ENDPOINT = '/api/collection';
   const PIN_HEADER = 'x-edit-pin';
@@ -79,16 +113,16 @@ const Store = (function () {
 
   /* One write at a time. Anything that arrives mid-flight waits and
      goes next, so a burst of edits cannot land out of order. */
-  function send(films) {
+  function send(films, generation) {
     sending = true;
     push(films)
       .then(function (saved) {
         sending = false;
-        listeners.saved(saved, queued === null && timer === null);
+        listeners.saved(saved, queued === null && timer === null, generation);
         if (queued) {
           const next = queued;
           queued = null;
-          send(next);
+          send(next.films, next.generation);
         }
       })
       .catch(function (error) {
@@ -116,14 +150,14 @@ const Store = (function () {
     },
 
     /* debounced, so typing a review is one write and not thirty */
-    save: function (films) {
+    save: function (films, generation) {
       if (!Auth.unlocked()) return;
       const wanted = snapshot(films);
       if (timer) window.clearTimeout(timer);
       timer = window.setTimeout(function () {
         timer = null;
-        if (sending) { queued = wanted; return; }
-        send(wanted);
+        if (sending) { queued = { films: wanted, generation: generation }; return; }
+        send(wanted, generation);
       }, DELAY);
     },
 
@@ -169,6 +203,78 @@ const Store = (function () {
 
 const YEAR_WATCHED_FLOOR = 1994;
 
+/* How the watched list may be ordered. Scariness leads, because
+   that is the question most often asked of this shelf. */
+const WATCHED_SORTS = [
+  { value: 'fear', label: 'Scariness' },
+  { value: 'enjoyment', label: 'How much I liked it' },
+  { value: 'watched', label: 'Year watched' }
+];
+
+const WATCHED_SORT_DEFAULT = 'fear';
+
+function isWatchedSort(value) {
+  return WATCHED_SORTS.some(function (sort) { return sort.value === value; });
+}
+
+/* "The Innocents" files under I, "A Cold Room" under C. */
+function sortableTitle(film) {
+  return normalise(film && film.title).replace(/^(the|a) /, '');
+}
+
+/* The tie-break shared by every watched sort: most recently
+   released first, undated at the very bottom, then alphabetical. */
+function compareByRelease(a, b) {
+  const yearA = Number(a.year) || null;
+  const yearB = Number(b.year) || null;
+
+  if (yearA !== yearB) {
+    if (yearA === null) return 1;
+    if (yearB === null) return -1;
+    return yearB - yearA;
+  }
+
+  const titleA = sortableTitle(a);
+  const titleB = sortableTitle(b);
+  if (titleA < titleB) return -1;
+  if (titleA > titleB) return 1;
+  return 0;
+}
+
+/* Rated films first, highest first; unrated below the lot, ordered
+   among themselves by the same tie-break. */
+function compareByLevel(key) {
+  return function (a, b) {
+    const levelA = a[key] || null;
+    const levelB = b[key] || null;
+
+    if (levelA !== levelB) {
+      if (levelA === null) return 1;
+      if (levelB === null) return -1;
+      return levelB - levelA;
+    }
+    return compareByRelease(a, b);
+  };
+}
+
+function compareByWatchedYear(a, b) {
+  const seenA = watchedYear(a);
+  const seenB = watchedYear(b);
+
+  if (seenA !== seenB) {
+    if (seenA === null) return 1;
+    if (seenB === null) return -1;
+    return seenB - seenA;
+  }
+  return compareByRelease(a, b);
+}
+
+function watchedComparator(sort) {
+  if (sort === 'enjoyment') return compareByLevel('enjoyment');
+  if (sort === 'watched') return compareByWatchedYear;
+  return compareByLevel('fear');
+}
+
 /* Years run from this one down to the floor, generated rather than
    written out, so the list is still right in ten years' time. An
    unexpected stored value is kept as its own option rather than
@@ -195,12 +301,22 @@ function watchedYear(film) {
 const Archive = (function () {
   let films = [];
 
+  /* Bumped whenever the whole collection is swapped out. A write
+     that was queued against an older generation must not be allowed
+     to reconcile over the newer one. */
+  let generation = 0;
+
   function copy(film) { return Object.assign({}, film); }
-  function persist() { Store.save(films); }
+  function persist() { Store.save(films, generation); }
 
   return {
+    generation: function () { return generation; },
+
     /* the collection as it arrived from the archive */
-    hydrate: function (incoming) { films = incoming.map(copy); },
+    hydrate: function (incoming) {
+      films = incoming.map(copy);
+      generation += 1;
+    },
 
     all: function () { return films.map(copy); },
     /* Watched is ordered by the year it was watched, most recent
@@ -208,23 +324,22 @@ const Archive = (function () {
        treated as year nought. Everything else, and every tie, falls
        back on order added - most recent first. Release year is
        shown on the tiles but never sorts anything. */
-    byStatus: function (status) {
+    /* Watched is ordered by whichever sort the reader has chosen.
+       To Watch and Banished stay on order added, most recent first. */
+    byStatus: function (status, sort) {
       const held = films
         .map(function (film, index) { return { film: film, index: index }; })
         .filter(function (entry) { return entry.film.status === status; });
 
-      held.sort(function (a, b) {
-        if (status === 'watched') {
-          const seenA = watchedYear(a.film);
-          const seenB = watchedYear(b.film);
+      const compare = status === 'watched' ? watchedComparator(sort) : null;
 
-          if (seenA !== seenB) {
-            if (seenA === null) return 1;    // unrecorded sinks
-            if (seenB === null) return -1;
-            return seenB - seenA;            // most recent first
-          }
+      held.sort(function (a, b) {
+        if (compare) {
+          const ordered = compare(a.film, b.film);
+          if (ordered !== 0) return ordered;
+          return b.index - a.index;          // a dead heat: newest addition first
         }
-        return b.index - a.index;            // most recently added first
+        return b.index - a.index;
       });
 
       return held.map(function (entry) { return copy(entry.film); });
@@ -250,7 +365,10 @@ const Archive = (function () {
       return copy(film);
     },
     /* wholesale replacement, used by import - the caller pushes it */
-    replace: function (incoming) { films = incoming.map(copy); }
+    replace: function (incoming) {
+      films = incoming.map(copy);
+      generation += 1;
+    }
   };
 })();
 
@@ -545,6 +663,9 @@ const EMPTY_STATES = {
 };
 
 let activeTab = 'to_watch';
+let watchedSort = isWatchedSort(Prefs.get('watchedSort', ''))
+  ? Prefs.get('watchedSort', WATCHED_SORT_DEFAULT)
+  : WATCHED_SORT_DEFAULT;
 let collectionState = 'loading';   // loading | ready | error
 let collectionError = '';
 let openFilmId = null;    // set when the open entry is in the collection
@@ -1292,6 +1413,26 @@ function discoverHTML() {
     '<div class="disc-body" id="discBody">' + discoverBodyHTML() + '</div>';
 }
 
+/* Ornamental small caps, the same language as the tabs and the
+   Discover filters. Choosing an order is reading, not editing, so
+   it stays available to a locked session. */
+function watchedSortHTML() {
+  return '' +
+    '<div class="disc-controls list-controls">' +
+      '<div class="control-row">' +
+        '<span class="control-label" id="ctl-watched-sort">Sort by</span>' +
+        '<div class="control-set" role="group" aria-labelledby="ctl-watched-sort">' +
+          WATCHED_SORTS.map(function (sort) {
+            return '<button class="control-opt" type="button"' +
+              ' data-watched-sort="' + esc(sort.value) + '"' +
+              ' aria-pressed="' + (watchedSort === sort.value ? 'true' : 'false') + '">' +
+              esc(sort.label) + '</button>';
+          }).join('') +
+        '</div>' +
+      '</div>' +
+    '</div>';
+}
+
 function renderTabs() {
   const parts = [];
 
@@ -1346,13 +1487,16 @@ function renderCollection() {
     return;
   }
 
-  const films = Archive.byStatus(activeTab);
+  const films = Archive.byStatus(activeTab, watchedSort);
+  const sorter = activeTab === 'watched' ? watchedSortHTML() : '';
+
   if (!films.length) {
-    dom.collection.innerHTML = emptyHTML(activeTab);
+    dom.collection.innerHTML = sorter + emptyHTML(activeTab);
     return;
   }
 
-  dom.collection.innerHTML = '<div class="grid">' + films.map(tileHTML).join('') + '</div>';
+  dom.collection.innerHTML = sorter +
+    '<div class="grid">' + films.map(tileHTML).join('') + '</div>';
   guardPosters();
 }
 
@@ -1884,6 +2028,17 @@ dom.collection.addEventListener('click', function (event) {
     return;
   }
 
+  const sortChoice = event.target.closest('[data-watched-sort]');
+  if (sortChoice) {
+    const chosen = sortChoice.dataset.watchedSort;
+    if (isWatchedSort(chosen) && chosen !== watchedSort) {
+      watchedSort = chosen;
+      Prefs.set('watchedSort', chosen);
+      renderCollection();
+    }
+    return;
+  }
+
   const discoverTile = event.target.closest('.tile--discover');
   if (discoverTile) {
     openDiscoverEntry(Number(discoverTile.dataset.tmdb));
@@ -1896,6 +2051,17 @@ dom.collection.addEventListener('click', function (event) {
 
 dom.collection.addEventListener('keydown', function (event) {
   if (event.key !== 'Enter' && event.key !== ' ') return;
+
+  const sortChoice = event.target.closest('[data-watched-sort]');
+  if (sortChoice) {
+    const chosen = sortChoice.dataset.watchedSort;
+    if (isWatchedSort(chosen) && chosen !== watchedSort) {
+      watchedSort = chosen;
+      Prefs.set('watchedSort', chosen);
+      renderCollection();
+    }
+    return;
+  }
 
   const discoverTile = event.target.closest('.tile--discover');
   if (discoverTile && event.target.closest('.tile-art')) {
@@ -1970,10 +2136,12 @@ dom.scrim.addEventListener('mousedown', function (event) {
 });
 
 Store.listen(
-  function (saved, settled) {
+  function (saved, settled, generation) {
     hideNotice();
-    /* only take the archive's copy when nothing newer is waiting */
+    /* only take the archive's copy when nothing newer is waiting,
+       and never when the collection has been swapped out since */
     if (!settled) return;
+    if (generation !== undefined && generation !== Archive.generation()) return;
     Archive.hydrate(saved);
     render();
   },
