@@ -598,9 +598,18 @@ button { cursor: pointer; }
 
 /* ---- result tiles ---- */
 
-.tile--discover { cursor: default; }
+.tile--discover { cursor: pointer; }
 
-.tile--discover .tile-art { z-index: 0; }
+/* the art and its actions travel together on hover */
+.tile-frame {
+  position: relative;
+  transition: transform var(--ease-lift);
+}
+.tile--discover:hover .tile-frame,
+.tile--discover:focus-within .tile-frame { transform: translateY(-4px); }
+.tile--discover:hover .tile-art,
+.tile--discover:focus-within .tile-art { transform: none; }
+
 .tile-art.has-poster::after { z-index: 1; }
 
 .tile-actions {
@@ -611,10 +620,14 @@ button { cursor: pointer; }
   bottom: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 12px;
+  border-top: 1px solid var(--gold-faint);
+  background: linear-gradient(
+    to top,
+    rgba(7, 5, 6, 0.97) 0%,
+    rgba(7, 5, 6, 0.94) 72%,
+    rgba(7, 5, 6, 0.84) 100%
+  );
   opacity: 0;
-  background: linear-gradient(to top, rgba(7, 5, 6, 0.97) 0%, rgba(7, 5, 6, 0.92) 48%, rgba(7, 5, 6, 0.55) 78%, rgba(7, 5, 6, 0) 100%);
   transition: opacity var(--ease);
 }
 .tile--discover:hover .tile-actions,
@@ -626,24 +639,48 @@ button { cursor: pointer; }
 }
 
 .tile-action {
-  padding: 8px 6px;
-  border: 1px solid var(--gold-faint);
-  background: var(--ink);
-  color: var(--ivory-dim);
+  position: relative;
+  display: block;
+  width: 100%;
+  padding: 8px 16px;
+  border: 0;
+  border-top: 1px solid rgba(184, 155, 94, 0.16);
+  background: transparent;
+  color: rgba(242, 236, 227, 0.74);
   font-family: var(--serif-body);
-  font-size: 0.58rem;
+  font-size: 0.56rem;
   letter-spacing: 0.2em;
   text-transform: uppercase;
-  transition: color var(--ease), border-color var(--ease), background-color var(--ease);
+  text-align: center;
+  transition: color var(--ease), background-color var(--ease);
 }
-.tile-action:hover {
+.tile-action:first-child { border-top: 0; }
+
+/* a small diamond marks the action under the pointer */
+.tile-action::before {
+  content: "";
+  position: absolute;
+  left: 11px;
+  top: 50%;
+  width: 4px;
+  height: 4px;
+  margin-top: -2px;
+  border: 1px solid var(--gold-dim);
+  transform: rotate(45deg);
+  opacity: 0;
+  transition: opacity var(--ease);
+}
+.tile-action:hover::before,
+.tile-action:focus-visible::before { opacity: 1; }
+
+.tile-action:hover,
+.tile-action:focus-visible {
   color: var(--ivory);
-  background: var(--oxblood);
-  border-color: var(--oxblood-lift);
+  background: rgba(122, 18, 32, 0.42);
 }
-.tile-action--banish:hover {
-  background: var(--ink);
-  border-color: var(--oxblood-lift);
+.tile-action--banish:hover,
+.tile-action--banish:focus-visible {
+  background: rgba(13, 11, 12, 0.9);
   color: var(--oxblood-lift);
 }
 
@@ -931,6 +968,18 @@ button { cursor: pointer; }
   color: var(--ivory-dim);
 }
 .panel .rule { margin: clamp(24px, 4vw, 32px) 0; }
+
+.panel-tmdb {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--gold-faint);
+}
+.panel-tmdb .tmdb-score { margin-top: 0; margin-bottom: 12px; }
+.panel-overview {
+  font-size: 0.9rem;
+  line-height: 1.66;
+  color: var(--ivory-dim);
+}
 
 /* ---------- fields ---------- */
 

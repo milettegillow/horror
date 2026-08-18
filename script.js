@@ -638,7 +638,9 @@ const EMPTY_STATES = {
 };
 
 let activeTab = 'to_watch';
-let openFilmId = null;
+let openFilmId = null;    // set when the open entry is in the collection
+let draftFilm = null;     // set when it is a Discover result that is not
+let panelDetail = null;   // TMDB score, overview and director for the open entry
 let lastFocused = null;
 
 const dom = {
@@ -654,6 +656,10 @@ const dom = {
   fearGroup: document.getElementById('fearGroup'),
   yearWatched: document.getElementById('yearWatched'),
   review: document.getElementById('review'),
+  panelTmdb: document.getElementById('panelTmdb'),
+  panelScore: document.getElementById('panelScore'),
+  panelOverview: document.getElementById('panelOverview'),
+  panelFoot: document.querySelector('.panel-foot'),
   colophonCount: document.getElementById('colophonCount'),
   exportBtn: document.getElementById('exportBtn'),
   importBtn: document.getElementById('importBtn'),
@@ -667,6 +673,56 @@ const dom = {
   confirmNo: document.getElementById('confirmNo')
 };
 
+
+
+/* ------------------------------------------------------------
+   FILM DETAIL
+   ------------------------------------------------------------
+   The overview, the TMDB score and the director, fetched once per
+   film and kept. Search and discover payloads carry the first two
+   but never the crew, so the panel asks for credits by id.
+   ------------------------------------------------------------ */
+
+const Details = (function () {
+  const cache = new Map();
+  const waiting = new Map();
+
+  function extract(movie) {
+    const crew = movie && movie.credits && Array.isArray(movie.credits.crew) ? movie.credits.crew : [];
+    const directors = crew
+      .filter(function (person) { return person && person.job === 'Director'; })
+      .map(function (person) { return person.name; })
+      .filter(Boolean);
+
+    return {
+      voteAverage: Number(movie.vote_average) || 0,
+      overview: typeof movie.overview === 'string' ? movie.overview : '',
+      director: directors.join(', ')
+    };
+  }
+
+  function settle(tmdbId, detail) {
+    if (detail) cache.set(tmdbId, detail);
+    (waiting.get(tmdbId) || []).forEach(function (done) { done(detail); });
+    waiting.delete(tmdbId);
+  }
+
+  return {
+    get: function (tmdbId) { return cache.get(tmdbId) || null; },
+
+    load: function (tmdbId, done) {
+      if (!tmdbId) { done(null); return; }
+      if (cache.has(tmdbId)) { done(cache.get(tmdbId)); return; }
+      if (waiting.has(tmdbId)) { waiting.get(tmdbId).push(done); return; }
+
+      waiting.set(tmdbId, [done]);
+      fetch(TMDB_ENDPOINT + '?id=' + encodeURIComponent(tmdbId) + '&credits=1')
+        .then(function (response) { return response.ok ? response.json() : null; })
+        .then(function (movie) { settle(tmdbId, movie ? extract(movie) : null); })
+        .catch(function () { settle(tmdbId, null); });
+    }
+  };
+})();
 
 
 /* ------------------------------------------------------------
@@ -820,27 +876,46 @@ const Discover = (function () {
   };
 })();
 
-/* Take a Discover result onto the shelves at the given status. */
-function adopt(tmdbId, status) {
-  const result = Discover.find(tmdbId);
-  if (!result) return;
-
-  Archive.add({
-    id: 'tmdb-' + tmdbId,
+/* A Discover result in the shape of a film, not yet collected. */
+function draftFromResult(result) {
+  return {
+    id: 'tmdb-' + result.id,
     title: result.title || 'Untitled',
     year: Number(String(result.release_date || '').slice(0, 4)) || null,
     director: '',
     posterUrl: result.poster_path ? POSTER_BASE + result.poster_path : '',
-    tmdbId: tmdbId,
-    status: status,
+    tmdbId: result.id,
+    status: null,
     enjoyment: null,
     fear: null,
     review: '',
     yearWatched: ''
-  });
+  };
+}
 
-  renderTabs();
+function detailFromResult(result) {
+  return {
+    voteAverage: Number(result.vote_average) || 0,
+    overview: typeof result.overview === 'string' ? result.overview : '',
+    director: ''
+  };
+}
+
+/* Take a Discover result onto the shelves at the given status.
+   Marking something watched opens its entry, so the ratings can be
+   set while the film is still in mind. */
+function adopt(tmdbId, status, thenOpen) {
+  const result = Discover.find(tmdbId);
+  if (!result) return;
+
+  const film = draftFromResult(result);
+  film.status = status;
+  Archive.add(film);
+
+  refreshChrome();
   Discover.dismiss(tmdbId);
+
+  if (thenOpen) openEntry(Archive.get(film.id), detailFromResult(result));
 }
 
 
@@ -947,21 +1022,32 @@ function discoverTileHTML(result) {
   const score = (Number(result.vote_average) || 0).toFixed(1);
   const title = result.title || 'Untitled';
 
+  const actions = [
+    { status: 'to_watch', label: 'add to watchlist', modifier: '' },
+    { status: 'watched', label: 'mark as watched', modifier: '' },
+    { status: 'banished', label: 'banish', modifier: ' tile-action--banish' }
+  ];
+
   return '' +
     '<article class="tile tile--discover" data-tmdb="' + esc(result.id) + '">' +
-      '<div class="tile-art' + (poster ? ' has-poster' : '') + '">' +
-        (poster ? '<img class="tile-img" src="' + esc(poster) + '" alt="" loading="lazy" decoding="async">' : '') +
-        '<div class="plate">' +
-          '<span class="plate-mark" aria-hidden="true"></span>' +
-          '<span class="plate-title">' + esc(title) + '</span>' +
-          '<span class="plate-rule" aria-hidden="true"></span>' +
-          '<span class="plate-year">' + esc(year || '') + '</span>' +
+      '<div class="tile-frame">' +
+        '<div class="tile-art' + (poster ? ' has-poster' : '') + '" role="button" tabindex="0"' +
+        ' aria-label="' + esc(title + (year ? ', ' + year : '') + '. Open entry.') + '">' +
+          (poster ? '<img class="tile-img" src="' + esc(poster) + '" alt="" loading="lazy" decoding="async">' : '') +
+          '<div class="plate">' +
+            '<span class="plate-mark" aria-hidden="true"></span>' +
+            '<span class="plate-title">' + esc(title) + '</span>' +
+            '<span class="plate-rule" aria-hidden="true"></span>' +
+            '<span class="plate-year">' + esc(year || '') + '</span>' +
+          '</div>' +
         '</div>' +
+        /* siblings of the art, so no button sits inside another */
         '<div class="tile-actions">' +
-          '<button class="tile-action" type="button" data-discover-add="to_watch" data-tmdb="' + esc(result.id) + '">' +
-            'add to watchlist</button>' +
-          '<button class="tile-action tile-action--banish" type="button" data-discover-add="banished" data-tmdb="' + esc(result.id) + '">' +
-            'banish</button>' +
+          actions.map(function (action) {
+            return '<button class="tile-action' + action.modifier + '" type="button"' +
+              ' data-discover-add="' + action.status + '" data-tmdb="' + esc(result.id) + '">' +
+              esc(action.label) + '</button>';
+          }).join('') +
         '</div>' +
       '</div>' +
       '<div class="tile-meta">' +
@@ -1144,24 +1230,88 @@ function renderPanelControls(film) {
   renderRatingGroup('fear', film.fear);
 }
 
-function openPanel(id) {
-  const film = Archive.get(id);
+function currentFilm() {
+  return openFilmId ? Archive.get(openFilmId) : draftFilm;
+}
+
+function subLine(film) {
+  const director = film.director || (panelDetail && panelDetail.director) || '';
+  const year = film.year || 'year unknown';
+  return director ? year + ' - directed by ' + director : String(year);
+}
+
+function renderPanelDetail(film) {
+  const score = panelDetail && panelDetail.voteAverage ? panelDetail.voteAverage.toFixed(1) : '';
+  const overview = panelDetail && panelDetail.overview ? panelDetail.overview : '';
+
+  dom.panelSub.textContent = subLine(film);
+  dom.panelScore.textContent = score;
+  dom.panelOverview.textContent = overview;
+  dom.panelScore.parentNode.hidden = !score;
+  dom.panelOverview.hidden = !overview;
+  dom.panelTmdb.hidden = !score && !overview;
+}
+
+function renderPanelFoot() {
+  dom.panelFoot.textContent = draftFilm
+    ? 'Not in your collection yet. Give it a standing or a rating and it joins.'
+    : 'Kept in this browser. Export from the foot of the page if you want a copy that outlives it.';
+}
+
+/* One entry, whether it is already collected or still a Discover result. */
+function openEntry(film, detail) {
   if (!film) return;
 
-  openFilmId = id;
-  lastFocused = document.activeElement;
+  const collected = Boolean(Archive.get(film.id));
+  openFilmId = collected ? film.id : null;
+  draftFilm = collected ? null : film;
+  panelDetail = detail || (film.tmdbId ? Details.get(film.tmdbId) : null);
+
+  if (dom.scrim.hidden) lastFocused = document.activeElement;
 
   dom.panelTitle.textContent = film.title;
-  dom.panelSub.textContent = film.director
-    ? film.year + ' - directed by ' + film.director
-    : String(film.year || 'year unknown');
   dom.yearWatched.value = film.yearWatched || '';
   dom.review.value = film.review || '';
   renderPanelControls(film);
+  renderPanelDetail(film);
+  renderPanelFoot();
 
   dom.scrim.hidden = false;
   document.body.classList.add('is-locked');
   dom.panel.focus();
+
+  /* fill in whatever the payload did not carry - usually the director */
+  if (film.tmdbId) {
+    const wanted = film.tmdbId;
+    Details.load(wanted, function (loaded) {
+      if (!loaded) return;
+      const open = currentFilm();
+      if (!open || open.tmdbId !== wanted) return;   // the panel moved on
+
+      panelDetail = Object.assign({}, panelDetail, {
+        voteAverage: loaded.voteAverage || (panelDetail && panelDetail.voteAverage) || 0,
+        overview: loaded.overview || (panelDetail && panelDetail.overview) || '',
+        director: loaded.director || (panelDetail && panelDetail.director) || ''
+      });
+
+      /* a collected film may as well keep the director it just learned */
+      if (openFilmId && loaded.director && !open.director) {
+        Archive.update(openFilmId, { director: loaded.director });
+      }
+      renderPanelDetail(currentFilm() || open);
+    });
+  }
+}
+
+function openPanel(id) {
+  openEntry(Archive.get(id), null);
+}
+
+/* A Discover tile: the film is not in the collection yet. */
+function openDiscoverEntry(tmdbId) {
+  const result = Discover.find(tmdbId);
+  if (!result) return;
+  openEntry(draftFromResult(result), detailFromResult(result));
 }
 
 function closePanel() {
@@ -1176,6 +1326,8 @@ function closePanel() {
   dom.scrim.hidden = true;
   document.body.classList.remove('is-locked');
   openFilmId = null;
+  draftFilm = null;
+  panelDetail = null;
 
   if (returning) {
     returning.focus();
@@ -1185,14 +1337,45 @@ function closePanel() {
   lastFocused = null;
 }
 
+/* The grid behind the panel only needs rebuilding when it shows films. */
+function refreshChrome() {
+  if (activeTab === 'discover') {
+    renderTabs();
+    renderColophon();
+  } else {
+    render();
+  }
+}
+
 /* Write a change, refresh the panel controls and the grid behind it.
-   Field values are left alone so typing is never interrupted. */
+   Field values are left alone so typing is never interrupted.
+
+   Editing anything on a Discover film puts it into the collection:
+   with the standing that was chosen, or as watched, since rating or
+   writing about something implies having seen it. */
 function commit(patch, refreshControls) {
-  if (!openFilmId) return;
-  const film = Archive.update(openFilmId, patch);
+  const open = currentFilm();
+  if (!open) return;
+
+  let film;
+
+  if (openFilmId) {
+    film = Archive.update(openFilmId, patch);
+  } else {
+    const joining = Object.assign({}, draftFilm, patch);
+    if (patch.status === undefined) joining.status = 'watched';
+
+    film = Archive.add(joining) || Archive.update(joining.id, joining);
+    openFilmId = joining.id;
+    draftFilm = null;
+
+    Discover.dismiss(open.tmdbId);
+    renderPanelFoot();
+  }
+
   if (!film) return;
   if (refreshControls) renderPanelControls(film);
-  render();
+  refreshChrome();
 }
 
 
@@ -1315,7 +1498,17 @@ dom.collection.addEventListener('click', function (event) {
 
   const action = event.target.closest('[data-discover-add]');
   if (action) {
-    adopt(Number(action.dataset.tmdb), action.dataset.discoverAdd);
+    /* the quick actions must not also open the entry behind them */
+    event.stopPropagation();
+    event.preventDefault();
+    const status = action.dataset.discoverAdd;
+    adopt(Number(action.dataset.tmdb), status, status === 'watched');
+    return;
+  }
+
+  const discoverTile = event.target.closest('.tile--discover');
+  if (discoverTile) {
+    openDiscoverEntry(Number(discoverTile.dataset.tmdb));
     return;
   }
 
@@ -1325,6 +1518,14 @@ dom.collection.addEventListener('click', function (event) {
 
 dom.collection.addEventListener('keydown', function (event) {
   if (event.key !== 'Enter' && event.key !== ' ') return;
+
+  const discoverTile = event.target.closest('.tile--discover');
+  if (discoverTile && event.target.closest('.tile-art')) {
+    event.preventDefault();
+    openDiscoverEntry(Number(discoverTile.dataset.tmdb));
+    return;
+  }
+
   const tile = event.target.closest('.tile');
   if (!tile || !tile.dataset.id) return;
   event.preventDefault();
@@ -1340,7 +1541,7 @@ dom.panel.addEventListener('click', function (event) {
     return;
   }
 
-  const film = Archive.get(openFilmId);
+  const film = currentFilm();
   if (!film) return;
 
   if (button.dataset.status) {
@@ -1374,7 +1575,7 @@ dom.panel.addEventListener('mouseover', function (event) {
 dom.panel.addEventListener('mouseout', function (event) {
   const group = event.target.closest('[data-rating]');
   if (!group || group.contains(event.relatedTarget)) return;
-  const film = Archive.get(openFilmId);
+  const film = currentFilm();
   if (film) renderRatingGroup(group.dataset.rating, film[group.dataset.rating]);
 });
 

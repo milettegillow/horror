@@ -6,6 +6,7 @@
 
      /api/tmdb?query=Suspiria   search, returns TMDB's payload
      /api/tmdb?id=11324         lookup, returns one movie
+     /api/tmdb?id=11324&credits=1   the same, with its crew
      /api/tmdb?mode=discover    top-rated horror, paged
 
    A film is searched for once. After that the client holds its
@@ -70,6 +71,10 @@ module.exports = async function handler(request, response) {
       return;
     }
     url = new URL(TMDB_MOVIE + id);
+    /* the detail panel wants a director, the poster service does not */
+    if (params.credits === '1' || params.credits === 'true') {
+      url.searchParams.set('append_to_response', 'credits');
+    }
   } else {
     url = new URL(TMDB_SEARCH);
     url.searchParams.set('query', query);
