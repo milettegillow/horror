@@ -653,9 +653,21 @@ const Details = (function () {
    pages until the grid has enough or the cap is reached.
    ------------------------------------------------------------ */
 
-const SEARCH_MIN = 3;            // shorter than this and nothing is asked for
+const SEARCH_MIN = 1;            // horror is full of one-letter titles: X, M, It, Us
+const SEARCH_SHORT = 2;          // at this length or less, a query is very short
 const SEARCH_DEBOUNCE = 300;
-const SEARCH_WEAK_VOTES = 20;    // below this, usually a short or a duplicate
+const SEARCH_DEBOUNCE_SHORT = 550;   // short queries wait a little longer
+
+/* Title match dominates; votes settle each tier. The tiers are far
+   enough apart that no vote count can lift a loose match over an
+   exact one - there are four films called exactly "X", and votes
+   are what tell them apart. */
+const SEARCH_EXACT = 1000;
+const SEARCH_PREFIX = 500;
+const SEARCH_LOOSE = 100;
+
+const SEARCH_VISIBLE = 20;         // a full payload
+const SEARCH_VISIBLE_SHORT = 12;   // a one-letter search should not flood the grid
 
 const DISCOVER_TARGET = 20;      // results wanted per fill
 const DISCOVER_MAX_PAGES = 6;    // pages crawled per fill, so a heavily
@@ -676,7 +688,7 @@ const Discover = (function () {
        than replacing it, so clearing the field puts the reader
        back where they were, filters and all */
     query: '',
-    search: { results: [], status: 'idle', reason: '' }
+    search: { results: [], status: 'idle', reason: '', visible: SEARCH_VISIBLE }
   };
 
   let searchTimer = null;
@@ -684,18 +696,51 @@ const Discover = (function () {
   /* TMDB relevance order is kept. Entries with no artwork or
      almost no votes are moved to the back, since those are nearly
      always shorts, duplicates and misfiled fragments. */
-  function rank(results) {
-    const strong = [];
-    const weak = [];
+  function titleTier(result, target) {
+    const candidates = [normalise(result.title), normalise(result.original_title)];
+    let best = SEARCH_LOOSE;
+
+    candidates.forEach(function (candidate) {
+      if (!candidate) return;
+      if (candidate === target) best = Math.max(best, SEARCH_EXACT);
+      else if (candidate.indexOf(target) === 0) best = Math.max(best, SEARCH_PREFIX);
+    });
+
+    return best;
+  }
+
+  function votesOf(result) {
+    return Math.max(0, Number(result.vote_count) || 0);
+  }
+
+  /* Sorted by how well the title answers the query, then by how
+     many people have seen it. Anything without artwork goes to the
+     bottom whatever it scores, since those are nearly always
+     duplicates and fragments. */
+  function rank(results, query) {
+    const target = normalise(query);
+    const shown = [];
+    const artless = [];
 
     results.forEach(function (result) {
       if (!result || !result.id) return;
-      const votes = Number(result.vote_count) || 0;
-      if (!result.poster_path || votes < SEARCH_WEAK_VOTES) weak.push(result);
-      else strong.push(result);
+      (result.poster_path ? shown : artless).push(result);
     });
 
-    return strong.concat(weak);
+    function order(a, b) {
+      const tierA = titleTier(a, target);
+      const tierB = titleTier(b, target);
+      if (tierA !== tierB) return tierB - tierA;
+      return votesOf(b) - votesOf(a);
+    }
+
+    shown.sort(order);
+    artless.sort(order);
+    return shown.concat(artless);
+  }
+
+  function visibleCap(query) {
+    return query.length <= SEARCH_SHORT ? SEARCH_VISIBLE_SHORT : SEARCH_VISIBLE;
   }
 
   function findResult(tmdbId) {
@@ -705,7 +750,7 @@ const Discover = (function () {
 
   function runSearch(query) {
     state.query = query;
-    state.search = { results: [], status: 'loading', reason: '' };
+    state.search = { results: [], status: 'loading', reason: '', visible: visibleCap(query) };
     renderDiscoverBody();
 
     fetch(TMDB_ENDPOINT + '?query=' + encodeURIComponent(query))
@@ -715,7 +760,7 @@ const Discover = (function () {
       })
       .then(function (data) {
         if (state.query !== query) return;   // a later search has overtaken this one
-        state.search.results = rank(Array.isArray(data.results) ? data.results : []);
+        state.search.results = rank(Array.isArray(data.results) ? data.results : [], query);
         state.search.status = 'ready';
         renderDiscoverBody();
       })
@@ -854,19 +899,32 @@ const Discover = (function () {
       if (query.length < SEARCH_MIN) {
         const was = Boolean(state.query);
         state.query = '';
-        state.search = { results: [], status: 'idle', reason: '' };
+        state.search = { results: [], status: 'idle', reason: '', visible: SEARCH_VISIBLE };
         if (was) renderDiscoverBody();
         return;
       }
 
       if (query === state.query && state.search.status === 'ready') return;
-      searchTimer = window.setTimeout(function () { runSearch(query); }, SEARCH_DEBOUNCE);
+
+      /* one or two letters wait a little longer, since those are the
+         queries still being typed */
+      const delay = query.length <= SEARCH_SHORT ? SEARCH_DEBOUNCE_SHORT : SEARCH_DEBOUNCE;
+      searchTimer = window.setTimeout(function () { runSearch(query); }, delay);
     },
 
     retrySearch: function () { if (state.query) runSearch(state.query); },
     kick: function () { if (state.status === 'idle') fill(true); },
     retry: function () { fill(true); },
-    more: function () { if (state.status === 'ready' && !state.exhausted) fill(false); },
+    more: function () {
+      if (state.query) {
+        const search = state.search;
+        if (search.status !== 'ready' || search.visible >= search.results.length) return;
+        search.visible += visibleCap(state.query);
+        renderDiscoverBody();
+        return;
+      }
+      if (state.status === 'ready' && !state.exhausted) fill(false);
+    },
     setFilter: function (kind, value) {
       if (kind === 'decade' && state.decade === value) return;
       if (kind === 'rating' && state.minRating === value) return;
@@ -1169,9 +1227,12 @@ function searchBodyHTML() {
 
   if (!search.results.length) return noteHTML(SEARCH_STATES.empty, 'empty');
 
-  return '<div class="grid">' + search.results.map(function (result) {
+  const showing = search.results.slice(0, search.visible);
+
+  return '<div class="grid">' + showing.map(function (result) {
     return discoverTileHTML(result, true);
-  }).join('') + '</div>';
+  }).join('') + '</div>' +
+    (search.visible < search.results.length ? loadMoreHTML(false) : '');
 }
 
 function browseBodyHTML() {
