@@ -28,6 +28,15 @@ the only things that read it.
 Opened as a plain file, `/api/collection` will not resolve and the site shows its
 designed error state rather than a collection.
 
+## Discover
+
+Discover browses TMDB's top-rated horror, filtered by decade and rating, with
+anything already in the collection removed. The search field above the filters
+looks up any film by name, in any genre - results are not filtered against the
+collection but marked with the standing they already have, so searching answers
+"do I have this?" as well as "what is this?". The browsable filters pause while
+a search is running and return untouched when the field is cleared.
+
 ## State of things
 
 Film data starts as a hardcoded seed in `script.js`, behind an `Archive` façade

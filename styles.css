@@ -544,8 +544,59 @@ button { cursor: pointer; }
 .rate-read.is-set { color: var(--gold); }
 
 /* ============================================================
-   Discover: filters, result tiles, load more
+   Discover: search, filters, result tiles, load more
    ============================================================ */
+
+.disc-search {
+  display: flex;
+  align-items: baseline;
+  gap: 18px;
+  margin-bottom: clamp(22px, 3vw, 30px);
+}
+
+.search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 11px 0;
+  background: var(--ink);
+  border: 0;
+  border-bottom: 1px solid var(--gold-line);
+  color: var(--ivory);
+  font-family: var(--serif-body);
+  font-size: 1.02rem;
+  transition: border-color var(--ease);
+}
+.search-input::placeholder {
+  font-size: 0.66rem;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: rgba(184, 155, 94, 0.6);
+}
+.search-input:focus {
+  outline: none;
+  border-bottom-color: var(--gold-dim);
+}
+.search-input:focus-visible { outline: none; }
+
+/* the native decoration does not belong in here */
+.search-input::-webkit-search-cancel-button,
+.search-input::-webkit-search-decoration {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.disc-clear { flex: 0 0 auto; }
+.disc-clear[hidden] { display: none; }
+
+.control-paused {
+  margin-bottom: 12px;
+  font-size: 0.72rem;
+  font-style: italic;
+  color: var(--ivory-faint);
+}
+.control-paused[hidden] { display: none; }
+
+.disc-controls.is-paused .control-row { opacity: 0.4; }
 
 .disc-controls {
   margin-bottom: clamp(28px, 4vw, 42px);
@@ -599,6 +650,39 @@ button { cursor: pointer; }
 /* ---- result tiles ---- */
 
 .tile--discover { cursor: pointer; }
+
+/* a search result that is already on the shelves says so */
+.tile-held {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  left: 0;
+  padding: 6px 12px;
+  background: var(--oxblood);
+  border-right: 1px solid var(--oxblood-lift);
+  border-bottom: 1px solid var(--oxblood-lift);
+  color: var(--ivory);
+  font-size: 0.54rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+
+.tile-year--lead {
+  margin-top: 5px;
+  font-family: var(--serif-display);
+  font-size: 1rem;
+  letter-spacing: 0.06em;
+  text-transform: none;
+  color: var(--ivory-dim);
+}
+
+.tile-holding {
+  margin-top: 7px;
+  font-size: 0.58rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(184, 155, 94, 0.8);
+}
 
 /* the art and its actions travel together on hover */
 .tile-frame {

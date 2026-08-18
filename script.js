@@ -445,6 +445,24 @@ const COLLECTION_STATES = {
   }
 };
 
+const SEARCH_STATES = {
+  loading: {
+    kicker: 'Looking',
+    title: 'Turning out the drawers',
+    body: 'The archive is being searched by name. It keeps everything, in no particular order, and takes a moment to find its footing.'
+  },
+  empty: {
+    kicker: 'Nothing under that name',
+    title: 'No such film',
+    body: 'Nothing in the archive answers to it. Either the spelling has slipped, or you have invented a film - which happens more often than anyone admits, usually at three in the morning.'
+  },
+  error: {
+    kicker: 'No reply',
+    title: 'The search went unanswered',
+    body: 'The request went out under that name and nothing came back. The archive is unreliable rather than unwilling, and is usually worth asking twice.'
+  }
+};
+
 const DISCOVER_STATES = {
   loading: {
     kicker: 'Consulting the archive',
@@ -589,6 +607,10 @@ const Details = (function () {
    pages until the grid has enough or the cap is reached.
    ------------------------------------------------------------ */
 
+const SEARCH_MIN = 3;            // shorter than this and nothing is asked for
+const SEARCH_DEBOUNCE = 300;
+const SEARCH_WEAK_VOTES = 20;    // below this, usually a short or a duplicate
+
 const DISCOVER_TARGET = 20;      // results wanted per fill
 const DISCOVER_MAX_PAGES = 6;    // pages crawled per fill, so a heavily
                                  // filtered decade cannot spin forever
@@ -602,8 +624,62 @@ const Discover = (function () {
     seen: new Set(),
     status: 'idle',      // idle | loading | more | ready | error
     reason: '',
-    exhausted: false
+    exhausted: false,
+
+    /* searching by name runs alongside the browsable grid rather
+       than replacing it, so clearing the field puts the reader
+       back where they were, filters and all */
+    query: '',
+    search: { results: [], status: 'idle', reason: '' }
   };
+
+  let searchTimer = null;
+
+  /* TMDB relevance order is kept. Entries with no artwork or
+     almost no votes are moved to the back, since those are nearly
+     always shorts, duplicates and misfiled fragments. */
+  function rank(results) {
+    const strong = [];
+    const weak = [];
+
+    results.forEach(function (result) {
+      if (!result || !result.id) return;
+      const votes = Number(result.vote_count) || 0;
+      if (!result.poster_path || votes < SEARCH_WEAK_VOTES) weak.push(result);
+      else strong.push(result);
+    });
+
+    return strong.concat(weak);
+  }
+
+  function findResult(tmdbId) {
+    const pools = state.search.results.concat(state.results);
+    return pools.filter(function (result) { return result.id === tmdbId; })[0] || null;
+  }
+
+  function runSearch(query) {
+    state.query = query;
+    state.search = { results: [], status: 'loading', reason: '' };
+    renderDiscoverBody();
+
+    fetch(TMDB_ENDPOINT + '?query=' + encodeURIComponent(query))
+      .then(function (response) {
+        if (!response.ok) throw new Error('the archive replied ' + response.status);
+        return response.json();
+      })
+      .then(function (data) {
+        if (state.query !== query) return;   // a later search has overtaken this one
+        state.search.results = rank(Array.isArray(data.results) ? data.results : []);
+        state.search.status = 'ready';
+        renderDiscoverBody();
+      })
+      .catch(function (error) {
+        if (state.query !== query) return;
+        state.search.status = 'error';
+        state.search.reason = error && error.message ? error.message : 'the search failed';
+        renderDiscoverBody();
+      });
+  }
 
   function decadeWindow(decade) {
     if (decade === 'all') return null;
@@ -706,9 +782,42 @@ const Discover = (function () {
 
   return {
     snapshot: function () { return state; },
-    find: function (tmdbId) {
-      return state.results.filter(function (result) { return result.id === tmdbId; })[0] || null;
+    searching: function () { return Boolean(state.query); },
+
+    find: findResult,
+
+    /* redraw one search tile, so a standing change shows without
+       rebuilding the grid under the reader */
+    refreshTile: function (tmdbId) {
+      const tile = dom.collection.querySelector('.tile--discover[data-tmdb="' + tmdbId + '"]');
+      const result = findResult(tmdbId);
+      if (!tile || !tile.parentNode || !result) return;
+
+      const holder = document.createElement('div');
+      holder.innerHTML = discoverTileHTML(result, true);
+      tile.parentNode.replaceChild(holder.firstChild, tile);
+      guardPosters();
     },
+
+    /* typed into the search field: debounced, and quiet below the
+       minimum length so two letters never reach the archive */
+    type: function (raw) {
+      const query = String(raw || '').trim();
+      if (searchTimer) window.clearTimeout(searchTimer);
+
+      if (query.length < SEARCH_MIN) {
+        const was = Boolean(state.query);
+        state.query = '';
+        state.search = { results: [], status: 'idle', reason: '' };
+        if (was) renderDiscoverBody();
+        return;
+      }
+
+      if (query === state.query && state.search.status === 'ready') return;
+      searchTimer = window.setTimeout(function () { runSearch(query); }, SEARCH_DEBOUNCE);
+    },
+
+    retrySearch: function () { if (state.query) runSearch(state.query); },
     kick: function () { if (state.status === 'idle') fill(true); },
     retry: function () { fill(true); },
     more: function () { if (state.status === 'ready' && !state.exhausted) fill(false); },
@@ -731,6 +840,18 @@ const Discover = (function () {
     }
   };
 })();
+
+/* The collected film carrying this TMDB id, if there is one.
+   Everything that adds from Discover checks here first, so a
+   second entry can never be made for the same film. */
+function collectedByTmdb(tmdbId) {
+  return Archive.all().filter(function (film) { return film.tmdbId === tmdbId; })[0] || null;
+}
+
+function statusLabel(status) {
+  const found = STATUSES.filter(function (option) { return option.value === status; })[0];
+  return found ? found.label : '';
+}
 
 /* A Discover result in the shape of a film, not yet collected. */
 function draftFromResult(result) {
@@ -765,14 +886,25 @@ function adopt(tmdbId, status, thenOpen) {
   const result = Discover.find(tmdbId);
   if (!result) return;
 
-  const film = draftFromResult(result);
-  film.status = status;
-  Archive.add(film);
+  const held = collectedByTmdb(tmdbId);
+  let film;
+
+  if (held) {
+    film = Archive.update(held.id, { status: status });   // never a second entry
+  } else {
+    film = draftFromResult(result);
+    film.status = status;
+    Archive.add(film);
+  }
 
   refreshChrome();
-  Discover.dismiss(tmdbId);
 
-  if (thenOpen) openEntry(Archive.get(film.id), detailFromResult(result));
+  /* browsing hands the film over and the tile leaves; searching is a
+     lookup, so the tile stays and simply reports its new standing */
+  if (Discover.searching()) Discover.refreshTile(tmdbId);
+  else Discover.dismiss(tmdbId);
+
+  if (thenOpen && film) openEntry(Archive.get(film.id), detailFromResult(result));
 }
 
 
@@ -850,6 +982,19 @@ function emptyHTML(key) {
 
 /* ---- Discover view ---- */
 
+function discoverSearchHTML() {
+  const state = Discover.snapshot();
+  return '' +
+    '<div class="disc-search">' +
+      '<label class="visually-hidden" for="discSearch">Search the archive by name</label>' +
+      '<input class="search-input" id="discSearch" type="search" autocomplete="off"' +
+      ' spellcheck="false" placeholder="Name any film - living or dead"' +
+      ' value="' + esc(state.query) + '">' +
+      '<button class="text-link disc-clear" id="discClear" type="button"' +
+      (state.query ? '' : ' hidden') + '>clear</button>' +
+    '</div>';
+}
+
 function discoverControlsHTML() {
   const state = Discover.snapshot();
   const rows = [
@@ -857,7 +1002,13 @@ function discoverControlsHTML() {
     { kind: 'rating', label: 'Minimum rating', options: RATING_FLOORS, active: state.minRating }
   ];
 
-  return '<div class="disc-controls">' + rows.map(function (row) {
+  const paused = Discover.searching();
+
+  return '<div class="disc-controls' + (paused ? ' is-paused' : '') + '">' +
+    '<p class="control-paused" id="controlPaused"' + (paused ? '' : ' hidden') + '>' +
+      'Paused while searching - decade and rating apply to the browsable list only.' +
+    '</p>' +
+    rows.map(function (row) {
     return '' +
       '<div class="control-row">' +
         '<span class="control-label" id="ctl-' + row.kind + '">' + esc(row.label) + '</span>' +
@@ -866,18 +1017,20 @@ function discoverControlsHTML() {
             const on = row.active === option.value;
             return '<button class="control-opt" type="button"' +
               ' data-discover-filter="' + row.kind + '" data-value="' + esc(option.value) + '"' +
-              ' aria-pressed="' + (on ? 'true' : 'false') + '">' + esc(option.label) + '</button>';
+              ' aria-pressed="' + (on ? 'true' : 'false') + '"' + (paused ? ' disabled' : '') + '>' +
+              esc(option.label) + '</button>';
           }).join('') +
         '</div>' +
       '</div>';
   }).join('') + '</div>';
 }
 
-function discoverTileHTML(result) {
+function discoverTileHTML(result, searching) {
   const year = Number(String(result.release_date || '').slice(0, 4)) || null;
   const poster = result.poster_path ? POSTER_BASE + result.poster_path : '';
   const score = (Number(result.vote_average) || 0).toFixed(1);
   const title = result.title || 'Untitled';
+  const held = collectedByTmdb(result.id);
 
   const actions = [
     { status: 'to_watch', label: 'add to watchlist', modifier: '' },
@@ -886,8 +1039,12 @@ function discoverTileHTML(result) {
   ];
 
   return '' +
-    '<article class="tile tile--discover" data-tmdb="' + esc(result.id) + '">' +
+    '<article class="tile tile--discover' + (searching ? ' tile--search' : '') + '"' +
+    ' data-tmdb="' + esc(result.id) + '">' +
       '<div class="tile-frame">' +
+        (held && held.status
+          ? '<span class="tile-held">' + esc(statusLabel(held.status)) + '</span>'
+          : '') +
         '<div class="tile-art' + (poster ? ' has-poster' : '') + '" role="button" tabindex="0"' +
         ' aria-label="' + esc(title + (year ? ', ' + year : '') + '. Open entry.') + '">' +
           (poster ? '<img class="tile-img" src="' + esc(poster) + '" alt="" loading="lazy" decoding="async">' : '') +
@@ -909,11 +1066,19 @@ function discoverTileHTML(result) {
       '</div>' +
       '<div class="tile-meta">' +
         '<h3 class="tile-title">' + esc(title) + '</h3>' +
-        '<p class="tile-year">' + esc(year || 'undated') + '</p>' +
+        '<p class="tile-year' + (searching ? ' tile-year--lead' : '') + '">' +
+          esc(year || 'undated') + '</p>' +
         '<p class="tmdb-score">' +
           '<span class="tmdb-label">TMDB score</span>' +
           '<span class="tmdb-value">' + esc(score) + '</span>' +
         '</p>' +
+        (held
+          ? '<p class="tile-holding">' +
+              (held.status
+                ? 'In your collection - ' + esc(statusLabel(held.status))
+                : 'In your collection - no standing') +
+            '</p>'
+          : '') +
       '</div>' +
     '</article>';
 }
@@ -945,24 +1110,79 @@ function loadMoreHTML(busy) {
     '</div>';
 }
 
-function discoverHTML() {
-  const state = Discover.snapshot();
-  let body = '';
+function searchBodyHTML() {
+  const search = Discover.snapshot().search;
 
-  if (state.status === 'loading') {
-    body = discoverNoteHTML('loading');
-  } else if (state.status === 'error') {
-    body = discoverNoteHTML('error',
-      '<p class="empty-reason">' + esc(state.reason) + '</p>' +
-      '<button class="ghost-btn" type="button" data-discover-retry>try again</button>');
-  } else if (!state.results.length) {
-    body = discoverNoteHTML('empty');
-  } else {
-    body = '<div class="grid">' + state.results.map(discoverTileHTML).join('') + '</div>' +
-      (state.exhausted ? '' : loadMoreHTML(state.status === 'more'));
+  if (search.status === 'loading') return noteHTML(SEARCH_STATES.loading, 'loading');
+
+  if (search.status === 'error') {
+    return noteHTML(SEARCH_STATES.error, 'error',
+      '<p class="empty-reason">' + esc(search.reason) + '</p>' +
+      '<button class="ghost-btn" type="button" data-search-retry>try again</button>');
   }
 
-  return discoverControlsHTML() + body;
+  if (!search.results.length) return noteHTML(SEARCH_STATES.empty, 'empty');
+
+  return '<div class="grid">' + search.results.map(function (result) {
+    return discoverTileHTML(result, true);
+  }).join('') + '</div>';
+}
+
+function browseBodyHTML() {
+  const state = Discover.snapshot();
+
+  if (state.status === 'loading') return discoverNoteHTML('loading');
+
+  if (state.status === 'error') {
+    return discoverNoteHTML('error',
+      '<p class="empty-reason">' + esc(state.reason) + '</p>' +
+      '<button class="ghost-btn" type="button" data-discover-retry>try again</button>');
+  }
+
+  if (!state.results.length) return discoverNoteHTML('empty');
+
+  return '<div class="grid">' + state.results.map(function (result) {
+    return discoverTileHTML(result, false);
+  }).join('') + '</div>' +
+    (state.exhausted ? '' : loadMoreHTML(state.status === 'more'));
+}
+
+function discoverBodyHTML() {
+  return Discover.searching() ? searchBodyHTML() : browseBodyHTML();
+}
+
+/* Only the body is replaced as searches come and go, so the field
+   keeps its value, its caret and the reader's attention. */
+function renderDiscoverBody() {
+  const body = document.getElementById('discBody');
+  if (!body) { renderCollection(); return; }
+
+  body.innerHTML = discoverBodyHTML();
+  guardPosters();
+  syncDiscoverChrome();
+}
+
+function syncDiscoverChrome() {
+  const searching = Discover.searching();
+
+  const clear = document.getElementById('discClear');
+  if (clear) clear.hidden = !searching;
+
+  const controls = dom.collection.querySelector('.disc-controls');
+  if (!controls) return;
+
+  controls.classList.toggle('is-paused', searching);
+  Array.prototype.forEach.call(controls.querySelectorAll('.control-opt'), function (button) {
+    button.disabled = searching;
+  });
+
+  const note = document.getElementById('controlPaused');
+  if (note) note.hidden = !searching;
+}
+
+function discoverHTML() {
+  return discoverSearchHTML() + discoverControlsHTML() +
+    '<div class="disc-body" id="discBody">' + discoverBodyHTML() + '</div>';
 }
 
 function renderTabs() {
@@ -999,8 +1219,22 @@ function renderCollection() {
   }
 
   if (activeTab === 'discover') {
+    const field = document.getElementById('discSearch');
+    const hadFocus = Boolean(field) && document.activeElement === field;
+    const caret = hadFocus ? field.selectionStart : null;
+
     dom.collection.innerHTML = discoverHTML();
     guardPosters();
+    syncDiscoverChrome();
+
+    if (hadFocus) {
+      const restored = document.getElementById('discSearch');
+      if (restored) {
+        restored.focus();
+        if (caret !== null) restored.setSelectionRange(caret, caret);
+      }
+    }
+
     Discover.kick();          // no-op unless nothing has been fetched yet
     return;
   }
@@ -1202,6 +1436,15 @@ function openPanel(id) {
 /* A Discover tile: the film is not in the collection yet. */
 function openDiscoverEntry(tmdbId) {
   const result = Discover.find(tmdbId);
+  const held = collectedByTmdb(tmdbId);
+
+  /* already on the shelves: open the entry that exists, with its
+     own ratings and review, rather than a fresh draft */
+  if (held) {
+    openEntry(Archive.get(held.id), result ? detailFromResult(result) : null);
+    return;
+  }
+
   if (!result) return;
   openEntry(draftFromResult(result), detailFromResult(result));
 }
@@ -1492,8 +1735,20 @@ dom.tabs.addEventListener('click', function (event) {
   render();
 });
 
+dom.collection.addEventListener('input', function (event) {
+  if (event.target && event.target.id === 'discSearch') Discover.type(event.target.value);
+});
+
 dom.collection.addEventListener('click', function (event) {
   if (event.target.closest('[data-collection-retry]')) { boot(); return; }
+  if (event.target.closest('[data-search-retry]')) { Discover.retrySearch(); return; }
+
+  if (event.target.closest('#discClear')) {
+    const field = document.getElementById('discSearch');
+    if (field) { field.value = ''; field.focus(); }
+    Discover.type('');
+    return;
+  }
 
   const filter = event.target.closest('[data-discover-filter]');
   if (filter) {
