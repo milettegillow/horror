@@ -10,6 +10,118 @@
 
 
 /* ------------------------------------------------------------
+   0. STORAGE
+   ------------------------------------------------------------
+   The only part of the app that knows where the collection is
+   kept. Everything else goes through Store.get and Store.save.
+   Swapping localStorage for Supabase means rewriting this block
+   and nothing else.
+
+   Writes are debounced, so typing a review does not hammer the
+   disk. Anything unreadable is treated as absent - a corrupt
+   value falls back to the seed rather than throwing.
+   ------------------------------------------------------------ */
+
+const STATUSES_ALLOWED = ['to_watch', 'watched', 'banished'];
+
+const Store = (function () {
+  const KEY = 'horror.collection.v1';
+  const DELAY = 500;
+  let timer = null;
+
+  /* private browsing and disabled storage both throw on write */
+  const usable = (function () {
+    try {
+      const probe = '__horror_probe__';
+      window.localStorage.setItem(probe, '1');
+      window.localStorage.removeItem(probe);
+      return true;
+    } catch (error) {
+      console.warn('horror: local storage is unavailable, this session will not be saved');
+      return false;
+    }
+  })();
+
+  function level(value) {
+    return value === 1 || value === 2 || value === 3 ? value : null;
+  }
+
+  /* One film, coerced into shape. Unknown fields are dropped and
+     missing ones defaulted, so an older or hand-edited file cannot
+     put a malformed record into the collection. */
+  function film(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    if (typeof raw.id !== 'string' || !raw.id) return null;
+    if (typeof raw.title !== 'string' || !raw.title) return null;
+
+    return {
+      id: raw.id,
+      title: raw.title,
+      year: Number(raw.year) || null,
+      director: typeof raw.director === 'string' ? raw.director : '',
+      posterUrl: typeof raw.posterUrl === 'string' ? raw.posterUrl : '',
+      tmdbId: Number(raw.tmdbId) || null,
+      status: STATUSES_ALLOWED.indexOf(raw.status) > -1 ? raw.status : null,
+      enjoyment: level(raw.enjoyment),
+      fear: level(raw.fear),
+      review: typeof raw.review === 'string' ? raw.review : '',
+      yearWatched: typeof raw.yearWatched === 'string' ? raw.yearWatched : ''
+    };
+  }
+
+  function collection(value) {
+    if (!Array.isArray(value)) return null;
+    const films = value.map(film).filter(Boolean);
+    return films.length ? films : null;
+  }
+
+  function write(films) {
+    if (!usable) return;
+    try {
+      window.localStorage.setItem(KEY, JSON.stringify(films));
+    } catch (error) {
+      console.warn('horror: the collection could not be saved - ' + (error && error.message));
+    }
+  }
+
+  return {
+    normalise: collection,
+
+    get: function () {
+      if (!usable) return null;
+      let raw = null;
+      try {
+        raw = window.localStorage.getItem(KEY);
+      } catch (error) {
+        return null;
+      }
+      if (!raw) return null;
+
+      try {
+        return collection(JSON.parse(raw));
+      } catch (error) {
+        console.warn('horror: the stored collection could not be read, falling back to the seed');
+        return null;
+      }
+    },
+
+    save: function (films) {
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(function () {
+        timer = null;
+        write(films);
+      }, DELAY);
+    },
+
+    saveNow: function (films) {
+      if (timer) { window.clearTimeout(timer); timer = null; }
+      write(films);
+    }
+  };
+})();
+
+
+/* ------------------------------------------------------------
    1. DATA LAYER
    ------------------------------------------------------------
    Everything below this comment block is the only part that
@@ -20,7 +132,8 @@
 
    film = {
      id, title, year, director, posterUrl, tmdbId,
-     status:    "to_watch" | "watched" | "banished",
+     status:    "to_watch" | "watched" | "banished" | null,
+                (null means no opinion: in no tab, back in Discover)
      enjoyment: 1 | 2 | 3 | null,   // how much I liked it
      fear:      1 | 2 | 3 | null,   // how scary it was
      review:    string,
@@ -219,9 +332,14 @@ const SEED_FILMS = [
 ];
 
 const Archive = (function () {
-  const films = SEED_FILMS.map(function (film) { return Object.assign({}, film); });
+  const stored = Store.get();
+  const films = stored || SEED_FILMS.map(function (film) { return Object.assign({}, film); });
+
+  /* first visit: lay the seed down straight away */
+  if (!stored) Store.saveNow(films);
 
   function copy(film) { return Object.assign({}, film); }
+  function persist() { Store.save(films); }
 
   return {
     all: function () { return films.map(copy); },
@@ -241,13 +359,21 @@ const Archive = (function () {
     add: function (film) {
       if (films.some(function (existing) { return existing.id === film.id; })) return null;
       films.push(Object.assign({}, film));
+      persist();
       return copy(film);
     },
     update: function (id, patch) {
       const film = films.find(function (f) { return f.id === id; });
       if (!film) return null;
       Object.assign(film, patch);
+      persist();
       return copy(film);
+    },
+    /* wholesale replacement, used by import */
+    replace: function (incoming) {
+      films.length = 0;
+      incoming.forEach(function (film) { films.push(Object.assign({}, film)); });
+      Store.saveNow(films);
     }
   };
 })();
@@ -527,7 +653,18 @@ const dom = {
   enjoymentGroup: document.getElementById('enjoymentGroup'),
   fearGroup: document.getElementById('fearGroup'),
   yearWatched: document.getElementById('yearWatched'),
-  review: document.getElementById('review')
+  review: document.getElementById('review'),
+  colophonCount: document.getElementById('colophonCount'),
+  exportBtn: document.getElementById('exportBtn'),
+  importBtn: document.getElementById('importBtn'),
+  importFile: document.getElementById('importFile'),
+  confirmScrim: document.getElementById('confirmScrim'),
+  confirmPanel: document.getElementById('confirmPanel'),
+  confirmEyebrow: document.getElementById('confirmEyebrow'),
+  confirmTitle: document.getElementById('confirmTitle'),
+  confirmBody: document.getElementById('confirmBody'),
+  confirmYes: document.getElementById('confirmYes'),
+  confirmNo: document.getElementById('confirmNo')
 };
 
 
@@ -572,13 +709,15 @@ const Discover = (function () {
     return TMDB_ENDPOINT + '?' + parts.join('&');
   }
 
-  /* Everything already on the shelves, by TMDB id where we have one.
+  /* Everything with a standing, by TMDB id where we have one.
      Title and year is a backstop for films whose poster lookup has
      not landed yet, so a seed film cannot briefly reappear here. */
   function collected() {
     const ids = new Set();
     const names = new Set();
     Archive.all().forEach(function (film) {
+      /* no standing means no opinion, so it belongs back in Discover */
+      if (film.status === null) return;
       if (film.tmdbId) ids.add(film.tmdbId);
       names.add(normalise(film.title) + '|' + film.year);
     });
@@ -951,9 +1090,20 @@ function paintPoster(id, url) {
   art.classList.add('has-poster');
 }
 
+const NUMBER_WORDS = ['No', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven',
+  'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen',
+  'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen', 'Twenty'];
+
+function renderColophon() {
+  const total = Archive.all().length;
+  const word = total <= 20 ? NUMBER_WORDS[total] : String(total);
+  dom.colophonCount.textContent = word + (total === 1 ? ' entry' : ' entries') + ', kept under glass.';
+}
+
 function render() {
   renderTabs();
   renderCollection();
+  renderColophon();
 }
 
 
@@ -1047,6 +1197,102 @@ function commit(patch, refreshControls) {
 
 
 /* ------------------------------------------------------------
+   CONFIRMATION, EXPORT AND IMPORT
+   ------------------------------------------------------------ */
+
+let confirmAction = null;
+
+function openConfirm(options) {
+  confirmAction = options.onConfirm || null;
+
+  dom.confirmEyebrow.textContent = options.eyebrow || 'Confirm';
+  dom.confirmTitle.textContent = options.title || '';
+  dom.confirmBody.textContent = options.body || '';
+  dom.confirmYes.textContent = options.confirmLabel || 'yes';
+  dom.confirmNo.textContent = options.cancelLabel || 'cancel';
+  dom.confirmYes.hidden = !options.onConfirm;   // a message only needs dismissing
+
+  dom.confirmScrim.hidden = false;
+  document.body.classList.add('is-locked');
+  dom.confirmPanel.focus();
+}
+
+function closeConfirm() {
+  if (dom.confirmScrim.hidden) return;
+  dom.confirmScrim.hidden = true;
+  confirmAction = null;
+  if (dom.scrim.hidden) document.body.classList.remove('is-locked');
+}
+
+function entryCount(total) {
+  return total + (total === 1 ? ' entry' : ' entries');
+}
+
+function exportCollection() {
+  const payload = JSON.stringify(Archive.all(), null, 2);
+  const blob = new Blob([payload], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+
+  link.href = url;
+  link.download = 'horror-collection.json';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  window.setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+}
+
+function importCollection(file) {
+  const reader = new FileReader();
+
+  reader.onerror = function () {
+    openConfirm({
+      eyebrow: 'Import',
+      title: 'That file would not open',
+      body: 'The file could not be read. Try exporting a fresh copy and importing that.',
+      cancelLabel: 'close'
+    });
+  };
+
+  reader.onload = function () {
+    let incoming = null;
+    try {
+      incoming = Store.normalise(JSON.parse(reader.result));
+    } catch (error) {
+      incoming = null;
+    }
+
+    if (!incoming) {
+      openConfirm({
+        eyebrow: 'Import',
+        title: 'Nothing usable in there',
+        body: 'That file does not hold a collection this ledger recognises. An exported file is a list of films, each with an id and a title.',
+        cancelLabel: 'close'
+      });
+      return;
+    }
+
+    openConfirm({
+      eyebrow: 'Import',
+      title: 'Replace the collection?',
+      body: 'This puts ' + entryCount(incoming.length) + ' in place of the ' +
+        entryCount(Archive.all().length) + ' you have now. There is no undo - export first if you want to keep them.',
+      confirmLabel: 'replace',
+      cancelLabel: 'keep what I have',
+      onConfirm: function () {
+        Archive.replace(incoming);
+        activeTab = 'to_watch';
+        render();
+        Posters.loadAll(Archive.all());
+      }
+    });
+  };
+
+  reader.readAsText(file);
+}
+
+
+/* ------------------------------------------------------------
    5. EVENTS
    ------------------------------------------------------------ */
 
@@ -1098,7 +1344,9 @@ dom.panel.addEventListener('click', function (event) {
   if (!film) return;
 
   if (button.dataset.status) {
-    commit({ status: button.dataset.status }, true);
+    /* click the active standing again to set the film aside */
+    const next = film.status === button.dataset.status ? null : button.dataset.status;
+    commit({ status: next }, true);
     return;
   }
 
@@ -1142,8 +1390,32 @@ dom.scrim.addEventListener('mousedown', function (event) {
   if (event.target === dom.scrim) closePanel();
 });
 
+dom.exportBtn.addEventListener('click', exportCollection);
+
+dom.importBtn.addEventListener('click', function () { dom.importFile.click(); });
+
+dom.importFile.addEventListener('change', function () {
+  const file = dom.importFile.files && dom.importFile.files[0];
+  dom.importFile.value = '';        // so the same file can be chosen twice
+  if (file) importCollection(file);
+});
+
+dom.confirmYes.addEventListener('click', function () {
+  const action = confirmAction;
+  closeConfirm();
+  if (action) action();
+});
+
+dom.confirmNo.addEventListener('click', closeConfirm);
+
+dom.confirmScrim.addEventListener('mousedown', function (event) {
+  if (event.target === dom.confirmScrim) closeConfirm();
+});
+
 document.addEventListener('keydown', function (event) {
-  if (event.key === 'Escape') closePanel();
+  if (event.key !== 'Escape') return;
+  if (!dom.confirmScrim.hidden) { closeConfirm(); return; }
+  closePanel();
 });
 
 render();

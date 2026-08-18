@@ -25,7 +25,12 @@ the key is only ever read by the serverless function, never sent to the browser.
 
 ## State of things
 
-Film data is hardcoded in `script.js` behind an `Archive` façade, which hands out
-copies and takes writes through `Archive.update()`. Swapping the seed array for a
-real API and database means changing that one module. Edits live in memory only -
-a refresh resets everything, which is expected for now.
+Film data starts as a hardcoded seed in `script.js`, behind an `Archive` façade
+that hands out copies and takes writes through `Archive.update()`. Swapping the
+seed for a real API means changing that one module.
+
+The collection is persisted to localStorage under a single key, through the
+`Store` module at the top of `script.js` - the only place that touches storage.
+Replacing it with Supabase means rewriting that block and nothing else. Writes
+are debounced; a corrupt or unreadable value falls back to the seed. Export and
+import controls sit in the page footer.

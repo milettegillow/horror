@@ -224,7 +224,19 @@
       </div>
 
       <footer class="colophon">
-        <p>Fourteen entries, kept under glass.</p>
+        <p id="colophonCount">Kept under glass.</p>
+        <p class="colophon-links">
+          <button class="text-link" id="exportBtn" type="button">export</button>
+          <span class="diamond" aria-hidden="true"></span>
+          <button class="text-link" id="importBtn" type="button">import</button>
+        </p>
+        <input
+          class="visually-hidden"
+          id="importFile"
+          type="file"
+          accept="application/json,.json"
+          tabindex="-1"
+        />
       </footer>
     </main>
 
@@ -274,6 +286,10 @@
             role="group"
             aria-labelledby="statusLabel"
           ></div>
+          <p class="field-note">
+            Optional. Click the active standing again to clear it - the film goes
+            back into Discover.
+          </p>
         </div>
 
         <div class="field">
@@ -323,9 +339,56 @@
         </div>
 
         <p class="panel-foot">
-          Held in memory only. A refresh returns everything to its original
-          state.
+          Kept in this browser. Export from the foot of the page if you want a
+          copy that outlives it.
         </p>
+      </div>
+    </div>
+
+    <div class="scrim" id="confirmScrim" hidden>
+      <div
+        class="panel panel--slim"
+        id="confirmPanel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="confirmTitle"
+        tabindex="-1"
+      >
+        <span class="panel-corner panel-corner--tl" aria-hidden="true">
+          <svg viewBox="0 0 130 130"><use href="#orn-corner" /></svg>
+        </span>
+        <span class="panel-corner panel-corner--tr" aria-hidden="true">
+          <svg viewBox="0 0 130 130"><use href="#orn-corner" /></svg>
+        </span>
+        <span class="panel-corner panel-corner--bl" aria-hidden="true">
+          <svg viewBox="0 0 130 130"><use href="#orn-corner" /></svg>
+        </span>
+        <span class="panel-corner panel-corner--br" aria-hidden="true">
+          <svg viewBox="0 0 130 130"><use href="#orn-corner" /></svg>
+        </span>
+
+        <p class="panel-eyebrow" id="confirmEyebrow">Import</p>
+        <h2 class="panel-title" id="confirmTitle"></h2>
+        <p class="panel-sub" id="confirmBody"></p>
+
+        <div class="rule" aria-hidden="true">
+          <span class="rule-line"></span>
+          <span class="diamond"></span>
+          <svg class="rule-fleur" viewBox="0 0 24 34">
+            <use href="#orn-fleur" />
+          </svg>
+          <span class="diamond"></span>
+          <span class="rule-line"></span>
+        </div>
+
+        <div class="confirm-actions">
+          <button class="opt opt--danger" id="confirmYes" type="button">
+            replace
+          </button>
+          <button class="opt" id="confirmNo" type="button">
+            keep what I have
+          </button>
+        </div>
       </div>
     </div>
 
