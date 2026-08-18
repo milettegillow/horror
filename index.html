@@ -229,6 +229,14 @@
           <button class="text-link" id="exportBtn" type="button">export</button>
           <span class="diamond" aria-hidden="true"></span>
           <button class="text-link" id="importBtn" type="button">import</button>
+          <span class="diamond" aria-hidden="true"></span>
+          <button class="text-link" id="unlockBtn" type="button">unlock</button>
+          <button class="text-link" id="lockBtn" type="button" hidden>lock</button>
+        </p>
+        <p class="edit-badge" id="editBadge" hidden>
+          <span class="diamond" aria-hidden="true"></span>
+          <span>edit mode</span>
+          <span class="diamond" aria-hidden="true"></span>
         </p>
         <input
           class="visually-hidden"
@@ -389,6 +397,18 @@
           <span class="rule-line"></span>
         </div>
 
+        <div class="field confirm-field" id="confirmField" hidden>
+          <label class="field-label" for="confirmInput">PIN</label>
+          <input
+            class="text-input"
+            id="confirmInput"
+            type="password"
+            autocomplete="current-password"
+            inputmode="numeric"
+          />
+          <p class="field-note" id="confirmNote" hidden></p>
+        </div>
+
         <div class="confirm-actions">
           <button class="opt opt--danger" id="confirmYes" type="button">
             replace
@@ -398,6 +418,15 @@
           </button>
         </div>
       </div>
+    </div>
+
+    <div class="notice" id="notice" role="status" aria-live="polite" hidden>
+      <span class="notice-mark" aria-hidden="true"></span>
+      <p class="notice-text" id="noticeText"></p>
+      <span class="notice-actions">
+        <button class="text-link" id="noticeRetry" type="button">try again</button>
+        <button class="text-link" id="noticeDismiss" type="button">dismiss</button>
+      </span>
     </div>
 
     <script src="script.js"></script>

@@ -10,112 +10,129 @@
 
 
 /* ------------------------------------------------------------
-   0. STORAGE
+   0. EDIT SESSION AND STORAGE
    ------------------------------------------------------------
-   The only part of the app that knows where the collection is
-   kept. Everything else goes through Store.get and Store.save.
-   Swapping localStorage for Supabase means rewriting this block
-   and nothing else.
+   The only part of the app that knows where the collection lives.
+   Everything else calls Store.load and Store.save.
 
-   Writes are debounced, so typing a review does not hammer the
-   disk. Anything unreadable is treated as absent - a corrupt
-   value falls back to the seed rather than throwing.
+   Reading is public. Writing carries a PIN, held for the tab in
+   sessionStorage and sent as a header; the server compares it and
+   the browser never learns whether it was right except by being
+   told. No Redis credential is ever present on this side.
    ------------------------------------------------------------ */
 
-const STATUSES_ALLOWED = ['to_watch', 'watched', 'banished'];
+const Auth = (function () {
+  const KEY = 'horror.pin';
+  let pin = '';
 
-const Store = (function () {
-  const KEY = 'horror.collection.v1';
-  const DELAY = 500;
-  let timer = null;
-
-  /* private browsing and disabled storage both throw on write */
-  const usable = (function () {
-    try {
-      const probe = '__horror_probe__';
-      window.localStorage.setItem(probe, '1');
-      window.localStorage.removeItem(probe);
-      return true;
-    } catch (error) {
-      console.warn('horror: local storage is unavailable, this session will not be saved');
-      return false;
-    }
-  })();
-
-  function level(value) {
-    return value === 1 || value === 2 || value === 3 ? value : null;
-  }
-
-  /* One film, coerced into shape. Unknown fields are dropped and
-     missing ones defaulted, so an older or hand-edited file cannot
-     put a malformed record into the collection. */
-  function film(raw) {
-    if (!raw || typeof raw !== 'object') return null;
-    if (typeof raw.id !== 'string' || !raw.id) return null;
-    if (typeof raw.title !== 'string' || !raw.title) return null;
-
-    return {
-      id: raw.id,
-      title: raw.title,
-      year: Number(raw.year) || null,
-      director: typeof raw.director === 'string' ? raw.director : '',
-      posterUrl: typeof raw.posterUrl === 'string' ? raw.posterUrl : '',
-      tmdbId: Number(raw.tmdbId) || null,
-      status: STATUSES_ALLOWED.indexOf(raw.status) > -1 ? raw.status : null,
-      enjoyment: level(raw.enjoyment),
-      fear: level(raw.fear),
-      review: typeof raw.review === 'string' ? raw.review : '',
-      yearWatched: typeof raw.yearWatched === 'string' ? raw.yearWatched : ''
-    };
-  }
-
-  function collection(value) {
-    if (!Array.isArray(value)) return null;
-    const films = value.map(film).filter(Boolean);
-    return films.length ? films : null;
-  }
-
-  function write(films) {
-    if (!usable) return;
-    try {
-      window.localStorage.setItem(KEY, JSON.stringify(films));
-    } catch (error) {
-      console.warn('horror: the collection could not be saved - ' + (error && error.message));
-    }
+  try {
+    pin = window.sessionStorage.getItem(KEY) || '';
+  } catch (error) {
+    pin = '';   // storage disabled: the session simply stays locked
   }
 
   return {
-    normalise: collection,
+    pin: function () { return pin; },
+    unlocked: function () { return Boolean(pin); },
+    unlock: function (value) {
+      pin = value;
+      try { window.sessionStorage.setItem(KEY, value); } catch (error) { /* held in memory only */ }
+    },
+    lock: function () {
+      pin = '';
+      try { window.sessionStorage.removeItem(KEY); } catch (error) { /* nothing to clear */ }
+    }
+  };
+})();
 
-    get: function () {
-      if (!usable) return null;
-      let raw = null;
-      try {
-        raw = window.localStorage.getItem(KEY);
-      } catch (error) {
-        return null;
-      }
-      if (!raw) return null;
+const Store = (function () {
+  const ENDPOINT = '/api/collection';
+  const PIN_HEADER = 'x-edit-pin';
+  const DELAY = 600;
 
-      try {
-        return collection(JSON.parse(raw));
-      } catch (error) {
-        console.warn('horror: the stored collection could not be read, falling back to the seed');
-        return null;
-      }
+  let timer = null;
+  let sending = false;
+  let queued = null;
+  let listeners = { saved: function () {}, failed: function () {} };
+
+  function snapshot(films) {
+    return films.map(function (film) { return Object.assign({}, film); });
+  }
+
+  function headers(pin) {
+    const set = { 'Content-Type': 'application/json' };
+    set[PIN_HEADER] = pin || Auth.pin();
+    return set;
+  }
+
+  function push(films, pin) {
+    return fetch(ENDPOINT, {
+      method: 'POST',
+      headers: headers(pin),
+      body: JSON.stringify(films)
+    }).then(function (response) {
+      if (response.status === 401) throw new Error('That PIN was refused.');
+      if (!response.ok) throw new Error('The archive replied ' + response.status + '.');
+      return response.json();
+    });
+  }
+
+  /* One write at a time. Anything that arrives mid-flight waits and
+     goes next, so a burst of edits cannot land out of order. */
+  function send(films) {
+    sending = true;
+    push(films)
+      .then(function (saved) {
+        sending = false;
+        listeners.saved(saved, queued === null && timer === null);
+        if (queued) {
+          const next = queued;
+          queued = null;
+          send(next);
+        }
+      })
+      .catch(function (error) {
+        sending = false;
+        queued = null;
+        listeners.failed(error && error.message ? error.message : 'The change could not be saved.', films);
+      });
+  }
+
+  return {
+    listen: function (onSaved, onFailed) {
+      listeners = { saved: onSaved, failed: onFailed };
     },
 
+    load: function () {
+      return fetch(ENDPOINT, { headers: { Accept: 'application/json' } })
+        .then(function (response) {
+          if (!response.ok) throw new Error('The archive replied ' + response.status + '.');
+          return response.json();
+        })
+        .then(function (films) {
+          if (!Array.isArray(films)) throw new Error('The archive sent something unreadable.');
+          return films;
+        });
+    },
+
+    /* debounced, so typing a review is one write and not thirty */
     save: function (films) {
+      if (!Auth.unlocked()) return;
+      const wanted = snapshot(films);
       if (timer) window.clearTimeout(timer);
       timer = window.setTimeout(function () {
         timer = null;
-        write(films);
+        if (sending) { queued = wanted; return; }
+        send(wanted);
       }, DELAY);
     },
 
-    saveNow: function (films) {
+    /* immediate, for import and for checking a PIN. The PIN can be
+       supplied rather than taken from the session, so one can be
+       tried without unlocking anything first. */
+    push: function (films, pin) {
       if (timer) { window.clearTimeout(timer); timer = null; }
-      write(films);
+      return push(snapshot(films), pin);
     }
   };
 })();
@@ -124,11 +141,14 @@ const Store = (function () {
 /* ------------------------------------------------------------
    1. DATA LAYER
    ------------------------------------------------------------
-   Everything below this comment block is the only part that
-   knows where films come from. The renderer never touches the
-   array directly - it asks Archive for copies and posts changes
-   back through Archive.update(). Replacing SEED_FILMS with a
-   fetch and Archive.update() with a PATCH is the whole job.
+   The renderer never touches the films array - it asks Archive
+   for copies and posts changes back through Archive.update(),
+   which hands them to Store.
+
+   The collection arrives from /api/collection and is held here
+   in memory while the tab is open, so rendering never waits on
+   the network. The seed that fills an empty archive lives in
+   api/seed.js, server-side.
 
    film = {
      id, title, year, director, posterUrl, tmdbId,
@@ -146,202 +166,17 @@ const Store = (function () {
    the film on TMDB - no further searching is done.
    ------------------------------------------------------------ */
 
-const SEED_FILMS = [
-  {
-    id: 'nosferatu-1922',
-    title: 'Nosferatu',
-    year: 1922,
-    director: 'F. W. Murnau',
-    posterUrl: '',
-    tmdbId: null,
-    status: 'watched',
-    enjoyment: 3,
-    fear: 2,
-    review: 'The frightening thing is the rhythm - Orlok never gives chase, he simply arrives. A century on and the shadow climbing the staircase still needs no sound to work.',
-    yearWatched: '2023'
-  },
-  {
-    id: 'vampyr-1932',
-    title: 'Vampyr',
-    year: 1932,
-    director: 'Carl Theodor Dreyer',
-    posterUrl: '',
-    tmdbId: null,
-    status: 'to_watch',
-    enjoyment: null,
-    fear: null,
-    review: '',
-    yearWatched: ''
-  },
-  {
-    id: 'black-sunday-1960',
-    title: 'Black Sunday',
-    year: 1960,
-    director: 'Mario Bava',
-    posterUrl: '',
-    tmdbId: null,
-    status: 'to_watch',
-    enjoyment: null,
-    fear: null,
-    review: '',
-    yearWatched: ''
-  },
-  {
-    id: 'the-innocents-1961',
-    title: 'The Innocents',
-    year: 1961,
-    director: 'Jack Clayton',
-    posterUrl: '',
-    tmdbId: null,
-    status: 'watched',
-    enjoyment: 3,
-    fear: 3,
-    review: 'Ambiguity held for a hundred minutes without once wobbling. Deborah Kerr plays it as devotion rather than hysteria, which is precisely what makes the last shot unbearable.',
-    yearWatched: '2024'
-  },
-  {
-    id: 'dont-look-now-1973',
-    title: "Don't Look Now",
-    year: 1973,
-    director: 'Nicolas Roeg',
-    posterUrl: '',
-    tmdbId: null,
-    status: 'watched',
-    enjoyment: 3,
-    fear: 2,
-    review: 'The editing is the horror. Venice as a cold labyrinth of scaffolding and canal water, and grief filed down until it has an edge.',
-    yearWatched: '2024'
-  },
-  {
-    id: 'suspiria-1977',
-    title: 'Suspiria',
-    year: 1977,
-    director: 'Dario Argento',
-    posterUrl: '',
-    tmdbId: null,
-    status: 'watched',
-    enjoyment: 1,
-    fear: 3,
-    review: '',
-    yearWatched: '2022'
-  },
-  {
-    id: 'the-shining-1980',
-    title: 'The Shining',
-    year: 1980,
-    director: 'Stanley Kubrick',
-    posterUrl: '',
-    tmdbId: null,
-    status: 'watched',
-    enjoyment: 3,
-    fear: 2,
-    review: 'Colder than it is frightening, and far better for it. The Overlook is a floor plan that refuses to add up and the film trusts you to notice on your own.',
-    yearWatched: '2021'
-  },
-  {
-    id: 'the-company-of-wolves-1984',
-    title: 'The Company of Wolves',
-    year: 1984,
-    director: 'Neil Jordan',
-    posterUrl: '',
-    tmdbId: null,
-    status: 'to_watch',
-    enjoyment: null,
-    fear: null,
-    review: '',
-    yearWatched: ''
-  },
-  {
-    id: 'bram-stokers-dracula-1992',
-    title: "Bram Stoker's Dracula",
-    year: 1992,
-    director: 'Francis Ford Coppola',
-    posterUrl: '',
-    tmdbId: null,
-    status: 'banished',
-    enjoyment: 1,
-    fear: 1,
-    review: 'All that money and not one still moment in it. Sent away for being exhausting rather than for being bad.',
-    yearWatched: '2019'
-  },
-  {
-    id: 'the-others-2001',
-    title: 'The Others',
-    year: 2001,
-    director: 'Alejandro Amenábar',
-    posterUrl: '',
-    tmdbId: null,
-    status: 'watched',
-    enjoyment: 2,
-    fear: 3,
-    review: '',
-    yearWatched: '2020'
-  },
-  {
-    id: 'crimson-peak-2015',
-    title: 'Crimson Peak',
-    year: 2015,
-    director: 'Guillermo del Toro',
-    posterUrl: '',
-    tmdbId: null,
-    status: 'watched',
-    enjoyment: 3,
-    fear: 1,
-    review: 'Less a ghost story than a gothic romance that lets the damp show. The house gives the finest performance in it, and the clay does the rest.',
-    yearWatched: '2023'
-  },
-  {
-    id: 'the-witch-2015',
-    title: 'The Witch',
-    year: 2015,
-    director: 'Robert Eggers',
-    posterUrl: '',
-    tmdbId: null,
-    status: 'to_watch',
-    enjoyment: null,
-    fear: null,
-    review: '',
-    yearWatched: ''
-  },
-  {
-    id: 'hereditary-2018',
-    title: 'Hereditary',
-    year: 2018,
-    director: 'Ari Aster',
-    posterUrl: '',
-    tmdbId: null,
-    status: 'banished',
-    enjoyment: 1,
-    fear: 3,
-    review: '',
-    yearWatched: '2019'
-  },
-  {
-    id: 'saint-maud-2020',
-    title: 'Saint Maud',
-    year: 2020,
-    director: 'Rose Glass',
-    posterUrl: '',
-    tmdbId: null,
-    status: 'to_watch',
-    enjoyment: null,
-    fear: null,
-    review: '',
-    yearWatched: ''
-  }
-];
 
 const Archive = (function () {
-  const stored = Store.get();
-  const films = stored || SEED_FILMS.map(function (film) { return Object.assign({}, film); });
-
-  /* first visit: lay the seed down straight away */
-  if (!stored) Store.saveNow(films);
+  let films = [];
 
   function copy(film) { return Object.assign({}, film); }
   function persist() { Store.save(films); }
 
   return {
+    /* the collection as it arrived from the archive */
+    hydrate: function (incoming) { films = incoming.map(copy); },
+
     all: function () { return films.map(copy); },
     byStatus: function (status) {
       return films
@@ -369,12 +204,8 @@ const Archive = (function () {
       persist();
       return copy(film);
     },
-    /* wholesale replacement, used by import */
-    replace: function (incoming) {
-      films.length = 0;
-      incoming.forEach(function (film) { films.push(Object.assign({}, film)); });
-      Store.saveNow(films);
-    }
+    /* wholesale replacement, used by import - the caller pushes it */
+    replace: function (incoming) { films = incoming.map(copy); }
   };
 })();
 
@@ -601,6 +432,19 @@ const RATING_FLOORS = [
   { value: '8', label: '8+' }
 ];
 
+const COLLECTION_STATES = {
+  loading: {
+    kicker: 'One moment',
+    title: 'Opening the ledger',
+    body: 'The collection is being fetched from the archive. It is a short journey and the pages are thin, so this should not take long.'
+  },
+  error: {
+    kicker: 'No reply',
+    title: 'The ledger will not open',
+    body: 'The collection could not be fetched. Nothing has been lost - the archive simply did not answer this time, and may well answer the next.'
+  }
+};
+
 const DISCOVER_STATES = {
   loading: {
     kicker: 'Consulting the archive',
@@ -638,6 +482,8 @@ const EMPTY_STATES = {
 };
 
 let activeTab = 'to_watch';
+let collectionState = 'loading';   // loading | ready | error
+let collectionError = '';
 let openFilmId = null;    // set when the open entry is in the collection
 let draftFilm = null;     // set when it is a Discover result that is not
 let panelDetail = null;   // TMDB score, overview and director for the open entry
@@ -662,6 +508,16 @@ const dom = {
   panelFoot: document.querySelector('.panel-foot'),
   colophonCount: document.getElementById('colophonCount'),
   exportBtn: document.getElementById('exportBtn'),
+  unlockBtn: document.getElementById('unlockBtn'),
+  lockBtn: document.getElementById('lockBtn'),
+  editBadge: document.getElementById('editBadge'),
+  confirmField: document.getElementById('confirmField'),
+  confirmInput: document.getElementById('confirmInput'),
+  confirmNote: document.getElementById('confirmNote'),
+  notice: document.getElementById('notice'),
+  noticeText: document.getElementById('noticeText'),
+  noticeRetry: document.getElementById('noticeRetry'),
+  noticeDismiss: document.getElementById('noticeDismiss'),
   importBtn: document.getElementById('importBtn'),
   importFile: document.getElementById('importFile'),
   confirmScrim: document.getElementById('confirmScrim'),
@@ -905,6 +761,7 @@ function detailFromResult(result) {
    Marking something watched opens its entry, so the ratings can be
    set while the film is still in mind. */
 function adopt(tmdbId, status, thenOpen) {
+  if (!Auth.unlocked()) return;
   const result = Discover.find(tmdbId);
   if (!result) return;
 
@@ -1045,7 +902,7 @@ function discoverTileHTML(result) {
         '<div class="tile-actions">' +
           actions.map(function (action) {
             return '<button class="tile-action' + action.modifier + '" type="button"' +
-              ' data-discover-add="' + action.status + '" data-tmdb="' + esc(result.id) + '">' +
+              ' data-discover-add="' + action.status + '" data-tmdb="' + esc(result.id) + '"' + lockedAttr() + '>' +
               esc(action.label) + '</button>';
           }).join('') +
         '</div>' +
@@ -1061,16 +918,19 @@ function discoverTileHTML(result) {
     '</article>';
 }
 
-function discoverNoteHTML(key, extra) {
-  const copy = DISCOVER_STATES[key];
+function noteHTML(copy, modifier, extra) {
   return '' +
-    '<div class="empty empty--' + key + '">' +
+    '<div class="empty' + (modifier ? ' empty--' + modifier : '') + '">' +
       '<div class="empty-mark" aria-hidden="true"></div>' +
       '<p class="empty-kicker">' + esc(copy.kicker) + '</p>' +
       '<h2 class="empty-title">' + esc(copy.title) + '</h2>' +
       '<p class="empty-body">' + esc(copy.body) + '</p>' +
       (extra || '') +
     '</div>';
+}
+
+function discoverNoteHTML(key, extra) {
+  return noteHTML(DISCOVER_STATES[key], key, extra);
 }
 
 function loadMoreHTML(busy) {
@@ -1126,6 +986,18 @@ function renderTabs() {
 }
 
 function renderCollection() {
+  if (collectionState === 'loading') {
+    dom.collection.innerHTML = noteHTML(COLLECTION_STATES.loading, 'loading');
+    return;
+  }
+
+  if (collectionState === 'error') {
+    dom.collection.innerHTML = noteHTML(COLLECTION_STATES.error, 'error',
+      '<p class="empty-reason">' + esc(collectionError) + '</p>' +
+      '<button class="ghost-btn" type="button" data-collection-retry>try again</button>');
+    return;
+  }
+
   if (activeTab === 'discover') {
     dom.collection.innerHTML = discoverHTML();
     guardPosters();
@@ -1186,19 +1058,37 @@ function renderColophon() {
   dom.colophonCount.textContent = word + (total === 1 ? ' entry' : ' entries') + ', kept under glass.';
 }
 
+/* Read-only visitors see every control, greyed rather than gone. */
+function applyLockState() {
+  const locked = !Auth.unlocked();
+
+  document.body.classList.toggle('is-readonly', locked);
+  dom.review.disabled = locked;
+  dom.yearWatched.disabled = locked;
+  dom.importBtn.disabled = locked;
+  dom.unlockBtn.hidden = !locked;
+  dom.lockBtn.hidden = locked;
+  dom.editBadge.hidden = locked;
+}
+
 function render() {
   renderTabs();
   renderCollection();
   renderColophon();
+  applyLockState();
 }
 
 
 /* ---- panel ---- */
 
+function lockedAttr() {
+  return Auth.unlocked() ? '' : ' disabled';
+}
+
 function renderStatusGroup(film) {
   dom.statusGroup.innerHTML = STATUSES.map(function (status) {
     return '<button class="opt" type="button" data-status="' + esc(status.value) + '"' +
-      ' aria-pressed="' + (film.status === status.value ? 'true' : 'false') + '">' +
+      ' aria-pressed="' + (film.status === status.value ? 'true' : 'false') + '"' + lockedAttr() + '>' +
       esc(status.label) + '</button>';
   }).join('');
 }
@@ -1212,7 +1102,7 @@ function renderRatingGroup(kind, value) {
       '<button class="rate-btn" type="button" data-level="' + level + '"' +
       ' aria-pressed="' + (value === level ? 'true' : 'false') + '"' +
       ' title="' + esc(meta.labels[level]) + '"' +
-      ' aria-label="' + esc(meta.labels[level] + ' - ' + level + ' of 3, ' + meta.legend) + '">' +
+      ' aria-label="' + esc(meta.labels[level] + ' - ' + level + ' of 3, ' + meta.legend) + '"' + lockedAttr() + '>' +
         iconHTML(meta.icon, Boolean(value) && level <= value) +
       '</button>';
   }
@@ -1255,7 +1145,9 @@ function renderPanelDetail(film) {
 function renderPanelFoot() {
   dom.panelFoot.textContent = draftFilm
     ? 'Not in your collection yet. Give it a standing or a rating and it joins.'
-    : 'Kept in this browser. Export from the foot of the page if you want a copy that outlives it.';
+    : (Auth.unlocked()
+      ? 'Kept in the archive. Changes are saved as you make them.'
+      : 'Read only. Unlock at the foot of the page to make changes.');
 }
 
 /* One entry, whether it is already collected or still a Discover result. */
@@ -1354,6 +1246,7 @@ function refreshChrome() {
    with the standing that was chosen, or as watched, since rating or
    writing about something implies having seen it. */
 function commit(patch, refreshControls) {
+  if (!Auth.unlocked()) return;
   const open = currentFilm();
   if (!open) return;
 
@@ -1395,9 +1288,15 @@ function openConfirm(options) {
   dom.confirmNo.textContent = options.cancelLabel || 'cancel';
   dom.confirmYes.hidden = !options.onConfirm;   // a message only needs dismissing
 
+  const asks = Boolean(options.prompt);
+  dom.confirmField.hidden = !asks;
+  dom.confirmInput.value = '';
+  dom.confirmNote.hidden = !options.note;
+  dom.confirmNote.textContent = options.note || '';
+
   dom.confirmScrim.hidden = false;
   document.body.classList.add('is-locked');
-  dom.confirmPanel.focus();
+  if (asks) dom.confirmInput.focus(); else dom.confirmPanel.focus();
 }
 
 function closeConfirm() {
@@ -1405,6 +1304,87 @@ function closeConfirm() {
   dom.confirmScrim.hidden = true;
   confirmAction = null;
   if (dom.scrim.hidden) document.body.classList.remove('is-locked');
+}
+
+let unsavedFilms = null;
+
+function showNotice(message) {
+  dom.noticeText.textContent = message + ' The change is still here, and unsaved.';
+  dom.notice.hidden = false;
+}
+
+function hideNotice() {
+  dom.notice.hidden = true;
+  unsavedFilms = null;
+}
+
+/* A PIN is proved by using it: the collection is written back
+   unchanged, and the archive either accepts it or does not. */
+function attemptUnlock(value) {
+  const pin = String(value || '').trim();
+  if (!pin) { promptForPin('Enter the PIN to continue.'); return; }
+
+  if (collectionState !== 'ready') {
+    openConfirm({
+      eyebrow: 'Edit mode',
+      title: 'Not yet',
+      body: 'The collection has not been read yet, so there is nothing safe to write back. Let it load, then unlock.',
+      cancelLabel: 'close'
+    });
+    return;
+  }
+
+  /* try the PIN before committing it, so the interface never
+     flickers open on a PIN the archive is about to refuse */
+  Store.push(Archive.all(), pin)
+    .then(function (saved) {
+      Auth.unlock(pin);
+      Archive.hydrate(saved);
+      hideNotice();
+      render();
+    })
+    .catch(function (error) {
+      promptForPin(error && error.message ? error.message : 'That PIN was refused.');
+    });
+}
+
+function promptForPin(note) {
+  openConfirm({
+    eyebrow: 'Edit mode',
+    title: 'Unlock the ledger',
+    body: 'Editing is kept behind a PIN. It is checked by the archive, held for this tab alone, and forgotten when the tab closes.',
+    prompt: true,
+    note: note || '',
+    confirmLabel: 'unlock',
+    cancelLabel: 'stay read-only',
+    onConfirm: attemptUnlock
+  });
+}
+
+function lockSession() {
+  Auth.lock();
+  hideNotice();
+  closePanel();
+  render();
+}
+
+function boot() {
+  collectionState = 'loading';
+  collectionError = '';
+  render();
+
+  Store.load()
+    .then(function (films) {
+      Archive.hydrate(films);
+      collectionState = 'ready';
+      render();
+      Posters.loadAll(Archive.all());
+    })
+    .catch(function (error) {
+      collectionState = 'error';
+      collectionError = error && error.message ? error.message : 'The archive did not answer.';
+      render();
+    });
 }
 
 function entryCount(total) {
@@ -1425,6 +1405,21 @@ function exportCollection() {
   window.setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
 }
 
+/* Enough of a check to refuse a file that is plainly not a
+   collection. The archive is the authority on shape - whatever it
+   stores comes back in the response and replaces this copy. */
+function readableCollection(value) {
+  if (!Array.isArray(value)) return null;
+
+  const films = value.filter(function (film) {
+    return film && typeof film === 'object' &&
+      typeof film.id === 'string' && film.id &&
+      typeof film.title === 'string' && film.title;
+  });
+
+  return films.length || value.length === 0 ? films : null;
+}
+
 function importCollection(file) {
   const reader = new FileReader();
 
@@ -1440,7 +1435,7 @@ function importCollection(file) {
   reader.onload = function () {
     let incoming = null;
     try {
-      incoming = Store.normalise(JSON.parse(reader.result));
+      incoming = readableCollection(JSON.parse(reader.result));
     } catch (error) {
       incoming = null;
     }
@@ -1466,7 +1461,18 @@ function importCollection(file) {
         Archive.replace(incoming);
         activeTab = 'to_watch';
         render();
-        Posters.loadAll(Archive.all());
+
+        Store.push(Archive.all())
+          .then(function (saved) {
+            Archive.hydrate(saved);
+            hideNotice();
+            render();
+            Posters.loadAll(Archive.all());
+          })
+          .catch(function (error) {
+            unsavedFilms = incoming;
+            showNotice(error && error.message ? error.message : 'The import could not be saved.');
+          });
       }
     });
   };
@@ -1487,6 +1493,8 @@ dom.tabs.addEventListener('click', function (event) {
 });
 
 dom.collection.addEventListener('click', function (event) {
+  if (event.target.closest('[data-collection-retry]')) { boot(); return; }
+
   const filter = event.target.closest('[data-discover-filter]');
   if (filter) {
     Discover.setFilter(filter.dataset.discoverFilter, filter.dataset.value);
@@ -1591,7 +1599,40 @@ dom.scrim.addEventListener('mousedown', function (event) {
   if (event.target === dom.scrim) closePanel();
 });
 
+Store.listen(
+  function (saved, settled) {
+    hideNotice();
+    /* only take the archive's copy when nothing newer is waiting */
+    if (!settled) return;
+    Archive.hydrate(saved);
+    render();
+  },
+  function (message, films) {
+    unsavedFilms = films;
+    showNotice(message);
+  }
+);
+
 dom.exportBtn.addEventListener('click', exportCollection);
+
+dom.unlockBtn.addEventListener('click', function () { promptForPin(''); });
+
+dom.lockBtn.addEventListener('click', lockSession);
+
+dom.noticeDismiss.addEventListener('click', hideNotice);
+
+dom.noticeRetry.addEventListener('click', function () {
+  dom.noticeText.textContent = 'Trying the archive again.';
+  Store.push(Archive.all())
+    .then(function (saved) {
+      Archive.hydrate(saved);
+      hideNotice();
+      render();
+    })
+    .catch(function (error) {
+      showNotice(error && error.message ? error.message : 'The change could not be saved.');
+    });
+});
 
 dom.importBtn.addEventListener('click', function () { dom.importFile.click(); });
 
@@ -1601,10 +1642,17 @@ dom.importFile.addEventListener('change', function () {
   if (file) importCollection(file);
 });
 
-dom.confirmYes.addEventListener('click', function () {
+function submitConfirm() {
   const action = confirmAction;
+  const typed = dom.confirmField.hidden ? null : dom.confirmInput.value;
   closeConfirm();
-  if (action) action();
+  if (action) action(typed);
+}
+
+dom.confirmYes.addEventListener('click', submitConfirm);
+
+dom.confirmInput.addEventListener('keydown', function (event) {
+  if (event.key === 'Enter') { event.preventDefault(); submitConfirm(); }
 });
 
 dom.confirmNo.addEventListener('click', closeConfirm);
@@ -1619,5 +1667,4 @@ document.addEventListener('keydown', function (event) {
   closePanel();
 });
 
-render();
-Posters.loadAll(Archive.all());
+boot();
