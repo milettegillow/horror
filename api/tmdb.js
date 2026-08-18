@@ -5,6 +5,7 @@
    server. Two paths:
 
      /api/tmdb?query=Suspiria   search, returns TMDB's payload
+     /api/tmdb?query=It&year=1990   the same, narrowed by year
      /api/tmdb?id=11324         lookup, returns one movie
      /api/tmdb?id=11324&credits=1   the same, with its crew
      /api/tmdb?mode=discover    top-rated horror, paged
@@ -79,9 +80,12 @@ module.exports = async function handler(request, response) {
     url = new URL(TMDB_SEARCH);
     url.searchParams.set('query', query);
     url.searchParams.set('include_adult', 'false');
-    /* No year filter. Release dates drift between sources, and a
-       strict year drops the right film instead of ranking it. The
-       client scores the results and decides. */
+
+    /* A year is only sent when the reader typed one. The poster
+       service never does: release dates drift between sources, and
+       a strict year drops the right film instead of ranking it. */
+    const year = typeof params.year === 'string' ? params.year.trim() : '';
+    if (/^\d{4}$/.test(year)) url.searchParams.set('primary_release_year', year);
   }
 
   url.searchParams.set('api_key', key);

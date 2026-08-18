@@ -291,6 +291,20 @@ function yearOptionsHTML(selected) {
   }).join('');
 }
 
+/* "it 1990" is a search for "it" narrowed to about 1990. A bare
+   year is left alone - it might be the title. */
+function parseSearchQuery(raw) {
+  const text = String(raw || '').trim();
+  const match = text.match(/^(.*\S)\s+(\d{4})$/);
+  if (!match) return { term: text, year: null };
+
+  const year = Number(match[2]);
+  const horizon = new Date().getFullYear() + SEARCH_YEAR_HORIZON;
+  if (year < SEARCH_YEAR_FLOOR || year > horizon) return { term: text, year: null };
+
+  return { term: match[1].trim(), year: year };
+}
+
 /* A four-digit yearWatched as a number, or null for anything
    blank or unparseable. */
 function watchedYear(film) {
@@ -783,14 +797,25 @@ const SEARCH_SHORT = 2;          // at this length or less, a query is very shor
 const SEARCH_DEBOUNCE = 300;
 const SEARCH_DEBOUNCE_SHORT = 550;   // short queries wait a little longer
 
-/* Title match dominates; votes settle each tier. The tiers are far
-   enough apart that no vote count can lift a loose match over an
-   exact one - there are four films called exactly "X", and votes
-   are what tell them apart. */
-const SEARCH_EXACT = 1000;
-const SEARCH_PREFIX = 500;
-const SEARCH_LOOSE = 100;
+/* Title match dominates. The tiers are spaced so that no year
+   boost and no vote count can lift a looser match over a tighter
+   one: the best a lower tier can add is 800 + 150, well under the
+   gap between any two tiers. A bare substring is punished hard,
+   because that is what drags Just Go With It into a search for It. */
+const SEARCH_EXACT = 10000;
+const SEARCH_PREFIX = 4000;
+const SEARCH_WORD = 1500;
+const SEARCH_SUBSTRING = 200;
 
+/* A year typed into the query narrows without excluding. */
+const SEARCH_YEAR_CLOSE = 800;    // within one year
+const SEARCH_YEAR_NEAR = 300;     // within three
+const SEARCH_VOTE_WEIGHT = 150;
+const SEARCH_VOTE_CEILING = 20000;
+const SEARCH_YEAR_FLOOR = 1900;
+const SEARCH_YEAR_HORIZON = 5;    // years beyond this one that still read as a year
+
+const SEARCH_THIN = 3;             // fewer than this and a year has narrowed too far
 const SEARCH_VISIBLE = 20;         // a full payload
 const SEARCH_VISIBLE_SHORT = 12;   // a one-letter search should not flood the grid
 
@@ -813,6 +838,8 @@ const Discover = (function () {
        than replacing it, so clearing the field puts the reader
        back where they were, filters and all */
     query: '',
+    term: '',
+    year: null,
     search: { results: [], status: 'idle', reason: '', visible: SEARCH_VISIBLE }
   };
 
@@ -823,27 +850,47 @@ const Discover = (function () {
      always shorts, duplicates and misfiled fragments. */
   function titleTier(result, target) {
     const candidates = [normalise(result.title), normalise(result.original_title)];
-    let best = SEARCH_LOOSE;
+    let best = 0;
 
     candidates.forEach(function (candidate) {
       if (!candidate) return;
-      if (candidate === target) best = Math.max(best, SEARCH_EXACT);
-      else if (candidate.indexOf(target) === 0) best = Math.max(best, SEARCH_PREFIX);
+
+      let tier = 0;
+      if (candidate === target) tier = SEARCH_EXACT;
+      else if (candidate.indexOf(target) === 0) tier = SEARCH_PREFIX;
+      else if ((' ' + candidate + ' ').indexOf(' ' + target + ' ') > -1) tier = SEARCH_WORD;
+      else if (candidate.indexOf(target) > -1) tier = SEARCH_SUBSTRING;
+
+      if (tier > best) best = tier;
     });
 
-    return best;
+    return best || SEARCH_SUBSTRING;
   }
 
-  function votesOf(result) {
-    return Math.max(0, Number(result.vote_count) || 0);
+  /* The typed year narrows rather than excludes: close is worth a
+     great deal, near is worth something, far is still eligible. */
+  function yearBoost(result, year) {
+    if (!year) return 0;
+    const released = Number(String(result.release_date || '').slice(0, 4));
+    if (!released) return 0;
+
+    const distance = Math.abs(released - year);
+    if (distance <= 1) return SEARCH_YEAR_CLOSE;
+    if (distance <= 3) return SEARCH_YEAR_NEAR;
+    return 0;
   }
 
-  /* Sorted by how well the title answers the query, then by how
-     many people have seen it. Anything without artwork goes to the
-     bottom whatever it scores, since those are nearly always
-     duplicates and fragments. */
-  function rank(results, query) {
-    const target = normalise(query);
+  function voteScore(result) {
+    const votes = Math.max(0, Number(result.vote_count) || 0);
+    return (Math.min(votes, SEARCH_VOTE_CEILING) / SEARCH_VOTE_CEILING) * SEARCH_VOTE_WEIGHT;
+  }
+
+  /* Sorted by how well the title answers the query, then by the year
+     if one was typed, then by how many people have seen it. Anything
+     without artwork goes to the bottom whatever it scores, since
+     those are nearly always duplicates and fragments. */
+  function rank(results, term, year) {
+    const target = normalise(term);
     const shown = [];
     const artless = [];
 
@@ -852,12 +899,11 @@ const Discover = (function () {
       (result.poster_path ? shown : artless).push(result);
     });
 
-    function order(a, b) {
-      const tierA = titleTier(a, target);
-      const tierB = titleTier(b, target);
-      if (tierA !== tierB) return tierB - tierA;
-      return votesOf(b) - votesOf(a);
+    function score(result) {
+      return titleTier(result, target) + yearBoost(result, year) + voteScore(result);
     }
+
+    function order(a, b) { return score(b) - score(a); }
 
     shown.sort(order);
     artless.sort(order);
@@ -873,19 +919,44 @@ const Discover = (function () {
     return pools.filter(function (result) { return result.id === tmdbId; })[0] || null;
   }
 
-  function runSearch(query) {
-    state.query = query;
-    state.search = { results: [], status: 'loading', reason: '', visible: visibleCap(query) };
-    renderDiscoverBody();
+  function fetchResults(term, year) {
+    const url = TMDB_ENDPOINT + '?query=' + encodeURIComponent(term) +
+      (year ? '&year=' + encodeURIComponent(year) : '');
 
-    fetch(TMDB_ENDPOINT + '?query=' + encodeURIComponent(query))
+    return fetch(url)
       .then(function (response) {
         if (!response.ok) throw new Error('the archive replied ' + response.status);
         return response.json();
       })
-      .then(function (data) {
-        if (state.query !== query) return;   // a later search has overtaken this one
-        state.search.results = rank(Array.isArray(data.results) ? data.results : [], query);
+      .then(function (data) { return Array.isArray(data.results) ? data.results : []; });
+  }
+
+  function runSearch(query) {
+    const parsed = parseSearchQuery(query);
+
+    state.query = query;
+    state.term = parsed.term;
+    state.year = parsed.year;
+    state.search = { results: [], status: 'loading', reason: '', visible: visibleCap(parsed.term) };
+    renderDiscoverBody();
+
+    fetchResults(parsed.term, parsed.year)
+      .then(function (results) {
+        if (state.query !== query) return null;   // a later search has overtaken this one
+
+        /* The year narrows at the source. If that has cut too deep -
+           a film dated a year off, a re-release - ask again without
+           it and let the ranking do the narrowing instead. */
+        if (parsed.year && results.length < SEARCH_THIN) {
+          return fetchResults(parsed.term, null).then(function (wider) {
+            return wider.length > results.length ? wider : results;
+          });
+        }
+        return results;
+      })
+      .then(function (results) {
+        if (!results || state.query !== query) return;
+        state.search.results = rank(results, parsed.term, parsed.year);
         state.search.status = 'ready';
         renderDiscoverBody();
       })
@@ -1019,11 +1090,14 @@ const Discover = (function () {
        minimum length so two letters never reach the archive */
     type: function (raw) {
       const query = String(raw || '').trim();
+      const parsed = parseSearchQuery(query);
       if (searchTimer) window.clearTimeout(searchTimer);
 
-      if (query.length < SEARCH_MIN) {
+      if (parsed.term.length < SEARCH_MIN) {
         const was = Boolean(state.query);
         state.query = '';
+        state.term = '';
+        state.year = null;
         state.search = { results: [], status: 'idle', reason: '', visible: SEARCH_VISIBLE };
         if (was) renderDiscoverBody();
         return;
@@ -1033,8 +1107,18 @@ const Discover = (function () {
 
       /* one or two letters wait a little longer, since those are the
          queries still being typed */
-      const delay = query.length <= SEARCH_SHORT ? SEARCH_DEBOUNCE_SHORT : SEARCH_DEBOUNCE;
+      const delay = parsed.term.length <= SEARCH_SHORT ? SEARCH_DEBOUNCE_SHORT : SEARCH_DEBOUNCE;
       searchTimer = window.setTimeout(function () { runSearch(query); }, delay);
+    },
+
+    /* drop the year, keep the words */
+    clearYear: function () {
+      if (!state.year) return;
+      const term = state.term;
+      const field = document.getElementById('discSearch');
+      if (field) { field.value = term; field.focus(); }
+      if (searchTimer) window.clearTimeout(searchTimer);
+      runSearch(term);
     },
 
     retrySearch: function () { if (state.query) runSearch(state.query); },
@@ -1219,6 +1303,13 @@ function discoverSearchHTML() {
       '<input class="search-input" id="discSearch" type="search" autocomplete="off"' +
       ' spellcheck="false" placeholder="Name any film - living or dead"' +
       ' value="' + esc(state.query) + '">' +
+      '<button class="year-chip" id="discYear" type="button" data-year-clear' +
+      (state.year ? '' : ' hidden') +
+      ' aria-label="Narrowed to ' + esc(state.year || '') + '. Remove the year.">' +
+        '<span class="diamond" aria-hidden="true"></span>' +
+        '<span class="year-chip-value" id="discYearValue">' + esc(state.year || '') + '</span>' +
+        '<span class="year-chip-drop">clear</span>' +
+      '</button>' +
       '<button class="text-link disc-clear" id="discClear" type="button"' +
       (state.query ? '' : ' hidden') + '>clear</button>' +
     '</div>';
@@ -1400,6 +1491,15 @@ function syncDiscoverChrome() {
   const clear = document.getElementById('discClear');
   if (clear) clear.hidden = !searching;
 
+  const year = Discover.snapshot().year;
+  const chip = document.getElementById('discYear');
+  if (chip) {
+    chip.hidden = !year;
+    chip.setAttribute('aria-label', 'Narrowed to ' + (year || '') + '. Remove the year.');
+    const value = document.getElementById('discYearValue');
+    if (value) value.textContent = year || '';
+  }
+
   const controls = dom.collection.querySelector('.disc-controls');
   if (!controls) return;
 
@@ -1471,7 +1571,11 @@ function renderCollection() {
   }
 
   if (activeTab === 'discover') {
+    /* Whatever is in the field is the truth, even mid-debounce: a
+       save landing in the background must not rewind what is being
+       typed to the last query that actually ran. */
     const field = document.getElementById('discSearch');
+    const typed = field ? field.value : null;
     const hadFocus = Boolean(field) && document.activeElement === field;
     const caret = hadFocus ? field.selectionStart : null;
 
@@ -1479,12 +1583,12 @@ function renderCollection() {
     guardPosters();
     syncDiscoverChrome();
 
-    if (hadFocus) {
-      const restored = document.getElementById('discSearch');
-      if (restored) {
-        restored.focus();
-        if (caret !== null) restored.setSelectionRange(caret, caret);
-      }
+    const restored = document.getElementById('discSearch');
+    if (restored && typed !== null && restored.value !== typed) restored.value = typed;
+
+    if (hadFocus && restored) {
+      restored.focus();
+      if (caret !== null) restored.setSelectionRange(caret, caret);
     }
 
     Discover.kick();          // no-op unless nothing has been fetched yet
@@ -2005,6 +2109,11 @@ dom.collection.addEventListener('input', function (event) {
 dom.collection.addEventListener('click', function (event) {
   if (event.target.closest('[data-collection-retry]')) { boot(); return; }
   if (event.target.closest('[data-search-retry]')) { Discover.retrySearch(); return; }
+
+  if (event.target.closest('[data-year-clear]')) {
+    Discover.clearYear();
+    return;
+  }
 
   if (event.target.closest('#discClear')) {
     const field = document.getElementById('discSearch');

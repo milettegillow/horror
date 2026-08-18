@@ -585,6 +585,37 @@ button { cursor: pointer; }
   appearance: none;
 }
 
+/* the parsed year, shown so it is clear why results narrowed */
+.year-chip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 12px;
+  background: var(--ink);
+  border: 1px solid var(--gold-faint);
+  color: var(--ivory-dim);
+  font-family: var(--serif-body);
+  font-size: 0.62rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  transition: color var(--ease), border-color var(--ease), background-color var(--ease);
+}
+.year-chip[hidden] { display: none; }
+.year-chip:hover {
+  color: var(--ivory);
+  border-color: var(--oxblood-lift);
+  background: rgba(122, 18, 32, 0.28);
+}
+.year-chip-value { color: var(--ivory); }
+.year-chip:hover .year-chip-value { color: var(--ivory); }
+.year-chip-drop {
+  color: rgba(184, 155, 94, 0.7);
+  font-size: 0.54rem;
+  letter-spacing: 0.16em;
+}
+.year-chip:hover .year-chip-drop { color: var(--ivory-dim); }
+
 .disc-clear { flex: 0 0 auto; }
 .disc-clear[hidden] { display: none; }
 
