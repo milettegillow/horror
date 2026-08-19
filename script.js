@@ -208,7 +208,7 @@ const YEAR_WATCHED_FLOOR = 1994;
 const WATCHED_SORTS = [
   { value: 'fear', label: 'Scariness' },
   { value: 'enjoyment', label: 'How much I liked it' },
-  { value: 'watched', label: 'Year watched' }
+  { value: 'released', label: 'Year released' }
 ];
 
 const WATCHED_SORT_DEFAULT = 'fear';
@@ -241,38 +241,31 @@ function compareByRelease(a, b) {
   return 0;
 }
 
-/* Rated films first, highest first; unrated below the lot, ordered
-   among themselves by the same tie-break. */
-function compareByLevel(key) {
-  return function (a, b) {
-    const levelA = a[key] || null;
-    const levelB = b[key] || null;
+/* Unrated counts as nought, so it falls below every rating. */
+function levelOf(film, key) {
+  return Number(film && film[key]) || 0;
+}
 
-    if (levelA !== levelB) {
-      if (levelA === null) return 1;
-      if (levelB === null) return -1;
-      return levelB - levelA;
-    }
+/* Read like a word: the chosen scale first, the other scale next,
+   so the scariest films one loved lead, then the scariest one liked
+   less, and so on down. A dead heat on both is settled by release
+   year, most recent first. */
+function compareByLevels(primary, secondary) {
+  return function (a, b) {
+    const byPrimary = levelOf(b, primary) - levelOf(a, primary);
+    if (byPrimary !== 0) return byPrimary;
+
+    const bySecondary = levelOf(b, secondary) - levelOf(a, secondary);
+    if (bySecondary !== 0) return bySecondary;
+
     return compareByRelease(a, b);
   };
 }
 
-function compareByWatchedYear(a, b) {
-  const seenA = watchedYear(a);
-  const seenB = watchedYear(b);
-
-  if (seenA !== seenB) {
-    if (seenA === null) return 1;
-    if (seenB === null) return -1;
-    return seenB - seenA;
-  }
-  return compareByRelease(a, b);
-}
-
 function watchedComparator(sort) {
-  if (sort === 'enjoyment') return compareByLevel('enjoyment');
-  if (sort === 'watched') return compareByWatchedYear;
-  return compareByLevel('fear');
+  if (sort === 'enjoyment') return compareByLevels('enjoyment', 'fear');
+  if (sort === 'released') return compareByRelease;
+  return compareByLevels('fear', 'enjoyment');
 }
 
 /* Years run from this one down to the floor, generated rather than
@@ -303,13 +296,6 @@ function parseSearchQuery(raw) {
   if (year < SEARCH_YEAR_FLOOR || year > horizon) return { term: text, year: null };
 
   return { term: match[1].trim(), year: year };
-}
-
-/* A four-digit yearWatched as a number, or null for anything
-   blank or unparseable. */
-function watchedYear(film) {
-  const raw = film && typeof film.yearWatched === 'string' ? film.yearWatched.trim() : '';
-  return /^\d{4}$/.test(raw) ? Number(raw) : null;
 }
 
 const Archive = (function () {
